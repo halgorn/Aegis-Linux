@@ -350,9 +350,8 @@ class CleanerPage(QWidget, CancellableScanMixin):
         # Render the 29 targets IMMEDIATELY (no IO) so checkboxes /
         # select-all / select-none are usable from second zero. The
         # background worker then walks each target's paths and emits
-        # per-target size updates, which refresh just the size cell.
+        # per-target size updates.
         self._render_placeholder()
-        QTimer.singleShot(0, self._refresh)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -369,7 +368,7 @@ class CleanerPage(QWidget, CancellableScanMixin):
         self._btn_none.clicked.connect(self._select_none)
         self._dryrun = QCheckBox("Dry run")
         self._dryrun.setChecked(True)
-        self._btn_scan = ScanButton("Scan")
+        self._btn_scan = ScanButton("Scan", page=self)
         self._btn_scan.clicked.connect(self._refresh)
         self._btn_clean = QPushButton("Clean selected")
         self._btn_clean.setObjectName("danger")
@@ -408,6 +407,12 @@ class CleanerPage(QWidget, CancellableScanMixin):
         outer.addWidget(split, 1)
         self._table.itemSelectionChanged.connect(self._on_select)
 
+    def on_show(self) -> None:
+        # Kick off the initial size scan the first time the user lands
+        # on this page. Re-clicking the Scan button re-runs the scan
+        # from scratch (with cancellation of the in-flight walk).
+        self._refresh()
+
     def _select_all(self) -> None:
         for cb in self._checks.values():
             cb.setChecked(True)
@@ -417,49 +422,50 @@ class CleanerPage(QWidget, CancellableScanMixin):
             cb.setChecked(False)
 
     def _refresh(self) -> None:
+        """Re-scan every target. The actual work (path walking,
+        size estimation, per-row UI updates) runs on a worker thread
+        for the duration of the scan; the button stays enabled and
+        flips its label to "Scan · …" while the work is in flight.
+        Re-clicks cancel the in-flight walk and restart from zero."""
         _set_status(self, "Scanning cleanable targets…")
+        page = self
+        def worker():
+            _log.info("[cleaner] worker start, %d targets", len(page._targets))
+            try:
+                from aegis.services.cleaner_service import _estimate_target_size
+                from aegis.domain.cleaner import CleanKind
+                for i, t in enumerate(page._targets):
+                    current = page._btn_scan._current
+                    if current is None or current.cancelled:
+                        _log.info("[cleaner] cancelled at i=%d", i)
+                        return
+                    if t.kind == CleanKind.EXEC:
+                        size = 0
+                    else:
+                        size = _estimate_target_size(t) or 0
+                    page._bridge.post(page._update_target_size, t, size)
+                    if i % 4 == 0:
+                        page._bridge.post(page._update_total)
+                page._bridge.post(page._update_total)
+                _log.info("[cleaner] worker done")
+            except Exception as e:  # noqa: BLE001
+                _log.exception("[cleaner] worker failed: %s", e)
+                raise
         def on_done(_):
-            pass  # sizes came in incrementally; nothing else to do
+            _log.info("[cleaner] on_done")
         def on_error(exc):
-            self._bridge.post(lambda e=exc: _show_toast(self, f"Scan failed: {e}", "error"))
-        self._btn_scan.start(self._runner, fn=self._scan_with_sizes,
+            _log.warning("[cleaner] on_error: %r", exc)
+            page._bridge.post(lambda e=exc: _show_toast(page, f"Scan failed: {e}", "error"))
+        self._btn_scan.start(self._runner, fn=worker,
                              bridge=self._bridge,
                              name="cleaner-scan",
                              on_done=on_done, on_error=on_error)
 
-    @staticmethod
-    def _scan_with_sizes() -> list:
-        """Walk each target's paths in a worker thread; for each one,
-        post the size back to the GUI so the table updates row by row."""
-        from aegis.services.cleaner_service import _estimate_target_size
-        from aegis.domain.cleaner import CleanKind
-        targets = list(all_targets())
-        # We can't post per-target updates from a static method; the
-        # page wrapper does that via _start_estimate_worker() below.
-        return targets
-
-    def _start_estimate_worker(self) -> None:
-        """Spawn the estimate worker. Emits per-target size updates
-        back to the GUI as soon as each target is sized."""
-        from aegis.services.cleaner_service import _estimate_target_size
-        from aegis.domain.cleaner import CleanKind
-        page = self
-        def worker():
-            for i, t in enumerate(page._targets):
-                if t.kind == CleanKind.EXEC:
-                    size = 0
-                else:
-                    size = _estimate_target_size(t) or 0
-                page._bridge.post(page._update_target_size, t, size)
-                if i % 4 == 0:
-                    page._bridge.post(page._update_total)
-            page._bridge.post(page._update_total)
-        spec = TaskSpec(name="cleaner-estimate", fn=worker)
-        self._runner.submit(spec)
-
     def _render_placeholder(self) -> None:
         """Render the 29 targets immediately with size='…' so all UI
-        controls (select all, checkboxes, dry-run, clean) are usable."""
+        controls (select all, checkboxes, dry-run, clean) are usable
+        from second zero. The actual size walk is triggered by the
+        'Scan' button (or by the page's on_show, when first shown)."""
         from aegis.rules.cleaner_rules import all_targets as _all
         self._targets = list(_all())
         self._checks.clear()
@@ -475,9 +481,7 @@ class CleanerPage(QWidget, CancellableScanMixin):
             self._table.setItem(row, 3, QTableWidgetItem("…"))
         self._total_lbl.setText("…")
         self._table.setEnabled(True)
-        _set_status(self, f"{len(self._targets)} targets loaded. Sizing…")
-        # Spawn the size worker
-        self._start_estimate_worker()
+        _set_status(self, f"{len(self._targets)} targets loaded. Click Scan to size.")
 
     def _update_target_size(self, t, size: int) -> None:
         """Called on GUI thread for each completed size."""
@@ -782,7 +786,7 @@ class HealthPage(QWidget, CancellableScanMixin):
         top.addWidget(info, 1)
         tw = QWidget(); tw.setLayout(top); outer.addWidget(tw)
         bar = QHBoxLayout()
-        self._btn_scan = ScanButton("Run scan")
+        self._btn_scan = ScanButton("Run scan", page=self)
         self._btn_scan.clicked.connect(self._refresh)
         bar.addWidget(self._btn_scan); bar.addStretch()
         bw = QWidget(); bw.setLayout(bar); outer.addWidget(bw)
