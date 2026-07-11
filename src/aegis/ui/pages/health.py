@@ -42,8 +42,11 @@ class HealthPage(tk.Frame):
         self._issues: list[HealthIssue] = []
         self._runner = TaskRunner(max_workers=1)
         from aegis.core.concurrency import MainThreadInvoker
-        # Reuse the application's bridge if registered globally.
         bridge = _get_bridge(parent)
+        from aegis.core.logging import get_logger
+        get_logger("health_page").info(
+            "bridge found: %s", bridge is not None
+        )
         if bridge is not None:
             self._runner.set_main_invoker(bridge.invoke)
         self._build()
@@ -69,12 +72,23 @@ class HealthPage(tk.Frame):
 
     def run_scan(self) -> None:
         self._status.set("Scanning…")
-        spec = TaskSpec(
-            name="health_scan",
-            fn=HealthService().run,
-            on_done=lambda r: self._render(r),
-        )
+        from aegis.core.concurrency import TaskSpec as _TS
+        from aegis.core.logging import get_logger
+        log = get_logger("health_page")
+
+        def worker():
+            log.info("health worker start")
+            r = HealthService().run()
+            log.info("health worker done %d", r.score)
+            return r
+
+        spec = _TS(name="health_scan", fn=worker,
+                    on_done=lambda r: self._render(r))
         self._runner.submit(spec)
+
+    def refresh(self) -> None:
+        """Alias used by AegisApp._show on navigation."""
+        self.run_scan()
 
     def _render(self, report) -> None:
         for w in self._body.inner.winfo_children():

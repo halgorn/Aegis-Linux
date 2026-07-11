@@ -156,6 +156,8 @@ class MainThreadInvoker:
         self._q: "queue.Queue[tuple]" = queue.Queue()
         self._root = root
         self._pump = root.after(self.POLL_MS, self._drain)
+        # Only react to destruction of the bridge's root window,
+        # not to widget recreation inside the tree.
         root.bind("<Destroy>", self._on_destroy, add="+")
 
     def invoke(self, fn: Callable[..., Any], *args: Any) -> None:
@@ -177,13 +179,17 @@ class MainThreadInvoker:
         except tk.TclError:
             pass  # root destroyed
 
-    def _on_destroy(self, _event) -> None:
-        if self._pump is not None:
-            try:
-                self._root.after_cancel(self._pump)
-            except tk.TclError:
-                pass
-            self._pump = None
+    def _on_destroy(self, event) -> None:
+        # Only kill the pump when the *root* window itself is destroyed,
+        # not when any descendant widget is torn down. Without this check,
+        # any widget redraw would silence the bridge's main-thread callback.
+        if event.widget is self._root:
+            if self._pump is not None:
+                try:
+                    self._root.after_cancel(self._pump)
+                except tk.TclError:
+                    pass
+                self._pump = None
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
