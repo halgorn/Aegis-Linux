@@ -183,15 +183,16 @@ class MainWindow(QMainWindow):
 
 def launch_gui(config: Config | None = None) -> int:
     """Entry point used by ``python -m aegis``."""
+    # Qt docs are explicit: the OpenGL backend attribute MUST be set
+    # before the QCoreApplication (and therefore the QApplication) is
+    # constructed. Calling it after is silently ignored and logs a
+    # warning at best. So we set it first.
+    if QApplication.instance() is None:
+        QApplication.setAttribute(
+            Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+        QApplication.setAttribute(
+            Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication.instance() or QApplication(sys.argv)
-    # Force the Qt RHI to use the desktop OpenGL backend so all
-    # QPainter, QPropertyAnimation and PyQt6-Charts drawing is
-    # composited by the GPU instead of the XRender / software path.
-    # Falls back to software if no GL is available.
-    QApplication.setAttribute(
-        Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
-    QApplication.setAttribute(
-        Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app.setApplicationName("Aegis Linux")
     app.setOrganizationName("Aegis")
     win = MainWindow(config or Config.load())

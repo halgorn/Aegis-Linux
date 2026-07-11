@@ -214,6 +214,27 @@ class ScanButton(QPushButton):
         self._glow_anim = QPropertyAnimation(self._glow, b"blurRadius", self)
         self._glow_anim.setDuration(180)
 
+    # ── hover glow animation (primary buttons only) ────────────────
+    def enterEvent(self, ev):  # noqa: N802
+        try:
+            self._glow_anim.stop()
+        except RuntimeError:
+            pass
+        self._glow_anim.setStartValue(self._glow.blurRadius())
+        self._glow_anim.setEndValue(18)
+        self._glow_anim.start()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):  # noqa: N802
+        try:
+            self._glow_anim.stop()
+        except RuntimeError:
+            pass
+        self._glow_anim.setStartValue(self._glow.blurRadius())
+        self._glow_anim.setEndValue(0)
+        self._glow_anim.start()
+        super().leaveEvent(ev)
+
     def start(self, runner: TaskRunner, fn, bridge: WorkerBridge | None = None,
               *, name: str = "scan", on_done=None, on_error=None) -> None:
         """Spawn a worker task. Cancels any previous one. Pass the
@@ -529,27 +550,6 @@ class Gauge(QWidget):
 
     # pyqtProperty is what QPropertyAnimation looks for.
     gaugeValue = pyqtProperty(float, fget=_get_value, fset=_set_value)
-
-    # ── hover glow animation (primary buttons only) ────────────────
-    def enterEvent(self, ev):  # noqa: N802
-        try:
-            self._glow_anim.stop()
-        except RuntimeError:
-            pass
-        self._glow_anim.setStartValue(self._glow.blurRadius())
-        self._glow_anim.setEndValue(18)
-        self._glow_anim.start()
-        super().enterEvent(ev)
-
-    def leaveEvent(self, ev):  # noqa: N802
-        try:
-            self._glow_anim.stop()
-        except RuntimeError:
-            pass
-        self._glow_anim.setStartValue(self._glow.blurRadius())
-        self._glow_anim.setEndValue(0)
-        self._glow_anim.start()
-        super().leaveEvent(ev)
 
     def paintEvent(self, _evt) -> None:  # noqa: N802
         p = QPainter(self)
