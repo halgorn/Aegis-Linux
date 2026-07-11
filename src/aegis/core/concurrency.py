@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import threading
+import tkinter as tk
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -60,9 +61,14 @@ class TaskRunner:
     """Bounded thread pool that runs :class:`TaskSpec` instances.
 
     The runner is intentionally tiny. Callbacks (``on_progress``,
-    ``on_done``, ``on_error``) are invoked from worker threads;
-    consumers are responsible for marshalling back to the Tk main
-    loop (use ``widget.after(0, ...)``).
+    ``on_done``, ``on_error``) are invoked from worker threads by
+    default. If :meth:`set_main_invoker` is called with a callable
+    ``invoker(callable, *args)`` that safely schedules ``callable``
+    on the Tk main loop, the callbacks are routed through it so
+    Tk widget calls are safe.
+
+    A common implementation is :class:`MainThreadInvoker` which uses
+    a thread-safe queue drained by the Tk event loop.
     """
 
     def __init__(self, max_workers: int = 4) -> None:
@@ -72,9 +78,12 @@ class TaskRunner:
         )
         self._futures: list[Future[Any]] = []
         self._lock = threading.Lock()
+        self._main_invoker: Callable[..., Any] | None = None
+
+    def set_main_invoker(self, invoker: Callable[..., Any] | None) -> None:
+        self._main_invoker = invoker
 
     def submit(self, spec: TaskSpec) -> Future[Any]:
-        """Schedule ``spec`` and return its :class:`Future`."""
         fut = self._ex.submit(self._run, spec)
         with self._lock:
             self._futures.append(fut)
@@ -82,16 +91,27 @@ class TaskRunner:
         return fut
 
     def cancel_all(self) -> None:
-        """Signal every running task to stop and drain the pool."""
         with self._lock:
             for fut in self._futures:
-                _ = fut.cancel()  # best effort
+                _ = fut.cancel()
         self._ex.shutdown(wait=False, cancel_futures=True)
 
     def shutdown(self, wait: bool = True) -> None:
         self._ex.shutdown(wait=wait)
 
-    # --- internals -------------------------------------------------------
+    def _dispatch(self, fn: Callable[..., Any] | None, *args: Any) -> None:
+        if fn is None:
+            return
+        inv = self._main_invoker
+        if inv is None:
+            fn(*args)
+        else:
+            try:
+                inv(fn, *args)
+            except Exception:  # noqa: BLE001
+                _log.exception("main-thread invoker raised")
+
+    # ── internal ──────────────────────────────────────────────────────
 
     def _run(self, spec: TaskSpec) -> Any:
         _log.debug("task start: %s", spec.name)
@@ -99,18 +119,10 @@ class TaskRunner:
             result = spec.fn(*spec.args, **spec.kwargs)
         except BaseException as exc:  # noqa: BLE001
             _log.warning("task %s failed: %r", spec.name, exc)
-            if spec.on_error is not None:
-                try:
-                    spec.on_error(exc)
-                except Exception:  # noqa: BLE001
-                    _log.exception("on_error callback raised")
+            self._dispatch(spec.on_error, exc)
             raise
         else:
-            if spec.on_done is not None:
-                try:
-                    spec.on_done(result)
-                except Exception:  # noqa: BLE001
-                    _log.exception("on_done callback raised")
+            self._dispatch(spec.on_done, result)
             return result
         finally:
             _log.debug("task end: %s", spec.name)
@@ -122,13 +134,64 @@ class TaskRunner:
             except ValueError:
                 pass
 
-    # --- helpers ---------------------------------------------------------
 
-    @staticmethod
-    def iter_with_cancel(items: Iterable[Any],
-                         cancel: threading.Event) -> Iterable[Any]:
-        """Yield ``items`` until ``cancel`` is set."""
-        for item in items:
-            if cancel.is_set():
-                return
-            yield item
+class MainThreadInvoker:
+    """Bridge worker callbacks onto the Tk main loop.
+
+    Usage::
+
+        bridge = MainThreadInvoker(root)
+        runner.set_main_invoker(bridge.invoke)
+        # root.after_idle(bridge.start)  # optional — constructor schedules it
+
+    Worker threads call :meth:`invoke(fn, *args)`. The function is
+    pushed into a thread-safe queue. The Tk main loop drains the
+    queue every 50 ms via ``widget.after``.
+    """
+
+    POLL_MS = 50
+
+    def __init__(self, root) -> None:
+        import queue
+        self._q: "queue.Queue[tuple]" = queue.Queue()
+        self._root = root
+        self._pump = root.after(self.POLL_MS, self._drain)
+        root.bind("<Destroy>", self._on_destroy, add="+")
+
+    def invoke(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Queue a callback for execution on the Tk main thread."""
+        self._q.put((fn, args))
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                fn, args = self._q.get_nowait()
+                try:
+                    fn(*args)
+                except Exception:  # noqa: BLE001
+                    _log.exception("main-thread callback raised")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._pump = self._root.after(self.POLL_MS, self._drain)
+        except tk.TclError:
+            pass  # root destroyed
+
+    def _on_destroy(self, _event) -> None:
+        if self._pump is not None:
+            try:
+                self._root.after_cancel(self._pump)
+            except tk.TclError:
+                pass
+            self._pump = None
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+def iter_with_cancel(items: Iterable[Any],
+                     cancel: threading.Event) -> Iterable[Any]:
+    """Yield ``items`` until ``cancel`` is set."""
+    for item in items:
+        if cancel.is_set():
+            return
+        yield item

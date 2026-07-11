@@ -238,6 +238,8 @@ def find_duplicates(root: str,
 def find_broken_symlinks(root: str,
                          skip_names: frozenset[str] = frozenset(),
                          cancel: threading.Event | None = None,
+                         max_depth: int = 8,
+                         limit: int = 500,
                          ) -> tuple[str, ...]:
     out: list[str] = []
     base = Path(root)
@@ -246,6 +248,10 @@ def find_broken_symlinks(root: str,
     for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
         if cancel is not None and cancel.is_set():
             return ()
+        if max_depth is not None:
+            depth = len(Path(dirpath).relative_to(base).parts)
+            if depth >= max_depth:
+                dirnames.clear()
         dirnames[:] = [
             d for d in dirnames
             if d not in skip_names and not d.startswith(".")
@@ -256,6 +262,8 @@ def find_broken_symlinks(root: str,
                 return ()
             if os.path.islink(fp) and not os.path.exists(fp):
                 out.append(fp)
+                if len(out) >= limit:
+                    return tuple(out)
     return tuple(out)
 
 
