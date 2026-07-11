@@ -130,10 +130,18 @@ class MainWindow(QMainWindow):
         page = self._pages.get(key)
         if page is None:
             return
-        # Cross-fade between pages — the new page fades in over the
-        # old one for 180ms, both composited by the GPU.
+        # Cancel any in-flight scan on the page being left so the UI
+        # thread doesn't get spammed with stale callbacks when the
+        # user is already looking at a different page.
         cur = self.stack.currentWidget()
         if cur is not None and cur is not page:
+            if hasattr(cur, "cancel_pending"):
+                try:
+                    cur.cancel_pending()  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001
+                    pass
+            # Cross-fade between pages — the new page fades in over the
+            # old one for 180ms, both composited by the GPU.
             eff = QGraphicsOpacityEffect(cur)
             cur.setGraphicsEffect(eff)
             anim_out = QPropertyAnimation(eff, b"opacity", self)
@@ -154,11 +162,11 @@ class MainWindow(QMainWindow):
         anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
         anim_in.start()
         anim_in.finished.connect(lambda p=page: p.setGraphicsEffect(None))
-        # Allow pages to react
+        # Allow pages to react (start their lazy scans on first show)
         if hasattr(page, "on_show"):
             try:
                 page.on_show()  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     def _register_pages(self) -> None:

@@ -73,8 +73,37 @@ def make_title(text: str, sub: str | None = None) -> QWidget:
     return wrap
 
 
+def _kpi_format(v: float, fmt_str: str, suffix: str) -> str:
+    return fmt_str.format(v) + suffix
+
+
+class KPILabel(QLabel):
+    """A QLabel with a tween-animatable ``kpiValue`` Qt property."""
+
+    def __init__(self, text: str, fmt: str = "{:.0f}", suffix: str = "",
+                 parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._fmt = fmt
+        self._suffix = suffix
+        self._last_value = 0.0
+
+    def _get_value(self) -> float:
+        return self._last_value
+
+    def _set_value(self, v: float) -> None:
+        self._last_value = v
+        self.setText(_kpi_format(v, self._fmt, self._suffix))
+
+    kpiValue = pyqtProperty(float, fget=_get_value, fset=_set_value)
+
+
 def make_kpi(label: str, value: str = "—", accent: str = "blue") -> QFrame:
-    """Compact KPI card: small label + large value."""
+    """Compact KPI card: small label + large value.
+
+    The card carries a tween animation hook — calling
+    :func:`set_kpi_value` interpolates the displayed value from the
+    previous label to ``target`` over 620ms with an OutCubic easing,
+    so KPI changes feel smooth instead of snapping."""
     card = QFrame()
     card.setObjectName("card")
     lay = QVBoxLayout(card)
@@ -82,12 +111,34 @@ def make_kpi(label: str, value: str = "—", accent: str = "blue") -> QFrame:
     lay.setSpacing(4)
     l = QLabel(label.upper())
     l.setObjectName("kpi_label")
-    v = QLabel(value)
+    v = KPILabel(value)
     v.setObjectName("kpi_value")
     lay.addWidget(l)
     lay.addWidget(v)
     card._value_lbl = v  # type: ignore[attr-defined]
+    card._anim = QPropertyAnimation(v, b"kpiValue", card)  # type: ignore[attr-defined]
+    card._anim.setDuration(620)
+    card._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    card._last_value = 0.0  # type: ignore[attr-defined]
     return card
+
+
+def set_kpi_value(card: QFrame, target: float, *, fmt: str = "{:.0f}",
+                  suffix: str = "") -> None:
+    """Tween the KPI value from its current label to ``target``."""
+    lbl: KPILabel = card._value_lbl  # type: ignore[attr-defined]
+    # Update formatter live (cheap, only on changes)
+    if lbl._fmt != fmt or lbl._suffix != suffix:
+        lbl._fmt = fmt
+        lbl._suffix = suffix
+    anim: QPropertyAnimation = card._anim  # type: ignore[attr-defined]
+    try:
+        anim.stop()
+    except RuntimeError:
+        pass
+    anim.setStartValue(float(lbl._last_value))
+    anim.setEndValue(target)
+    anim.start()
 
 
 def make_section(title: str) -> QWidget:
@@ -109,18 +160,49 @@ def make_section(title: str) -> QWidget:
 
 # ── async scan button ────────────────────────────────────────────────────────
 
+class CancellableScanMixin:
+    """Mixin for pages: tracks active TaskSpec instances and offers
+    ``cancel_pending()`` so the MainWindow can stop in-flight scans
+    when the user navigates away."""
+
+    def __init__(self) -> None:
+        self._pending: list = []
+
+    def _track(self, spec) -> None:
+        self._pending.append(spec)
+
+    def _untrack(self, spec) -> None:
+        try:
+            self._pending.remove(spec)
+        except ValueError:
+            pass
+
+    def cancel_pending(self) -> None:
+        for s in list(self._pending):
+            try:
+                s.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        self._pending.clear()
+
+
 class ScanButton(QPushButton):
     """Push-button that flips to a "Scanning…" state during a background
     task *without* being disabled. Re-clicks cancel the previous task
-    and start a new one, so the user always gets feedback."""
+    and start a new one, so the user always gets feedback.
 
-    def __init__(self, label: str = "Run scan") -> None:
+    Tracks the active TaskSpec on a per-page CancellableScanMixin so
+    the page can cancel it when the user navigates away."""
+
+    def __init__(self, label: str = "Run scan",
+                 page: CancellableScanMixin | None = None) -> None:
         super().__init__(label)
         self.setObjectName("primary")
         self.setMouseTracking(True)
         self._idle_label = label
         self._busy_label = label + " · …"
         self._current: Any = None  # current TaskSpec; cancelled on re-click
+        self._page = page
         # GPU-driven glow on hover — QGraphicsDropShadowEffect is
         # composited by the Qt RHI; just toggling the blur radius
         # triggers a repaint that the GPU handles in <1ms.
@@ -141,8 +223,10 @@ class ScanButton(QPushButton):
         if self._current is not None:
             try:
                 self._current.cancel()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
+            if self._page is not None:
+                self._page._untrack(self._current)
         self._bridge = bridge
         spec = TaskSpec(
             name=name, fn=fn,
@@ -150,6 +234,8 @@ class ScanButton(QPushButton):
             on_error=self._wrap_error(on_error),
         )
         self._current = spec
+        if self._page is not None:
+            self._page._track(spec)
         # setText/setEnabled must run on GUI thread; we are there.
         self.setText(self._busy_label)
         self.setEnabled(True)
@@ -157,6 +243,8 @@ class ScanButton(QPushButton):
 
     def finish(self, ok: bool = True, *, label: str | None = None) -> None:
         # Called on the GUI thread (via bridge.post) — safe to touch Qt widgets.
+        if self._current is not None and self._page is not None:
+            self._page._untrack(self._current)
         self._current = None
         self.setText(label or self._idle_label)
         self.setEnabled(True)

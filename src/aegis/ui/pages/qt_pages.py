@@ -64,6 +64,7 @@ from aegis.services.startup_service import scan as scan_startup
 from aegis.services.logs_service import tail as tail_logs
 from aegis.ui.theme import current, fmt_bytes, hex_to_rgb
 from aegis.ui.widgets.qt import (
+    CancellableScanMixin,
     Gauge,
     ScanButton,
     Sparkline,
@@ -71,6 +72,7 @@ from aegis.ui.widgets.qt import (
     make_kpi,
     make_section,
     make_title,
+    set_kpi_value,
 )
 
 
@@ -109,7 +111,35 @@ def _set_status(parent: QWidget, text: str) -> None:
 
 def _run_scan(page: QWidget, *,
               runner: TaskRunner, bridge: WorkerBridge,
-              name: str, fn, on_render) -> None:
+              name: str, fn, on_render, track: bool = True) -> None:
+    r"""Submit a scan task with bounded error handling. The worker fn runs
+    off-thread; on success it bounces ``on_render(result)`` to the GUI
+    via the bridge; on failure it shows an error toast. Both paths
+    leave the UI in a usable state — no disabled widgets. Tracks the
+    TaskSpec on the page (when track=True) so navigating away
+    cancels it."""
+    def _done(result):
+        bridge.post(on_render, result)
+    def _err(exc):
+        bridge.post(lambda e=exc: _show_toast(
+            page, f"{name} failed: {e}", "error"))
+    if track and isinstance(page, CancellableScanMixin):
+        # We need to build the spec *first* so the untrack closures
+        # can close over it.
+        spec = TaskSpec(name=name, fn=fn, on_done=_done, on_error=_err)
+        page._track(spec)
+        orig_done, orig_err = _done, _err
+        def _done_untrack(*a, kw=None, **kwrest):
+            page._untrack(spec)
+            orig_done(*a)
+        def _err_untrack(*a, kw=None, **kwrest):
+            page._untrack(spec)
+            orig_err(*a)
+        spec = TaskSpec(name=name, fn=fn,
+                        on_done=_done_untrack, on_error=_err_untrack)
+    else:
+        spec = TaskSpec(name=name, fn=fn, on_done=_done, on_error=_err)
+    runner.submit(spec)
     """Submit a scan task with bounded error handling. The worker fn runs
     off-thread; on success it bounces `on_render(result)` to the GUI
     via the bridge; on failure it shows an error toast. Both paths
@@ -142,9 +172,10 @@ def _wire_bridge(page: QWidget) -> None:
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
-class DashboardPage(QWidget):
+class DashboardPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
@@ -152,8 +183,7 @@ class DashboardPage(QWidget):
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._refresh)
         self._build_ui()
-        self._timer.start()
-        self._refresh()
+        # timer + scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -236,7 +266,10 @@ class DashboardPage(QWidget):
 
     def _render(self, snap: dict) -> None:
         try:
-            self._kpi_cpu._value_lbl.setText(f"{snap['cpu_pct']:.0f}%")  # type: ignore[attr-defined]
+            set_kpi_value(self._kpi_cpu, snap['cpu_pct'], fmt="{:.0f}", suffix="%")
+            # Memory and disk show two values; tween the percentage and
+            # string-update the bytes portion separately (no easy way to
+            # tween bytes — they're a function of the percentage).
             self._kpi_ram._value_lbl.setText(  # type: ignore[attr-defined]
                 f"{snap['ram_pct']:.0f}% · {fmt_bytes(snap['ram_used'])}"
             )
@@ -304,9 +337,10 @@ def _read_os_release() -> str:
 
 # ── Cleaner ───────────────────────────────────────────────────────────────────
 
-class CleanerPage(QWidget):
+class CleanerPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
@@ -539,9 +573,10 @@ class CleanerPage(QWidget):
 
 # ── Monitor ───────────────────────────────────────────────────────────────────
 
-class MonitorPage(QWidget):
+class MonitorPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
@@ -663,14 +698,15 @@ def _make_chart(label: str, color_key: str, *, capacity: int = 60):
 
 # ── Performance ───────────────────────────────────────────────────────────────
 
-class PerformancePage(QWidget):
+class PerformancePage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -719,15 +755,16 @@ class PerformancePage(QWidget):
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
-class HealthPage(QWidget):
+class HealthPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._svc = HealthService()
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -791,15 +828,16 @@ class HealthPage(QWidget):
 
 # ── Security ──────────────────────────────────────────────────────────────────
 
-class SecurityPage(QWidget):
+class SecurityPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._svc = SecurityService()
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -831,14 +869,15 @@ class SecurityPage(QWidget):
 
 # ── Network ───────────────────────────────────────────────────────────────────
 
-class NetworkPage(QWidget):
+class NetworkPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -883,14 +922,15 @@ class NetworkPage(QWidget):
 
 # ── Disks ─────────────────────────────────────────────────────────────────────
 
-class DisksPage(QWidget):
+class DisksPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -930,14 +970,15 @@ class DisksPage(QWidget):
 
 # ── Drivers ───────────────────────────────────────────────────────────────────
 
-class DriversPage(QWidget):
+class DriversPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -967,14 +1008,15 @@ class DriversPage(QWidget):
 
 # ── Packages ──────────────────────────────────────────────────────────────────
 
-class PackagesPage(QWidget):
+class PackagesPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -1003,14 +1045,15 @@ class PackagesPage(QWidget):
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
-class StartupPage(QWidget):
+class StartupPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -1040,11 +1083,12 @@ class StartupPage(QWidget):
 
 # ── Restore ───────────────────────────────────────────────────────────────────
 
-class RestorePage(QWidget):
+class RestorePage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -1099,14 +1143,15 @@ class RestorePage(QWidget):
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 
-class LogsPage(QWidget):
+class LogsPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         self._runner = _runner(host)
         self._bridge = _bridge(host)
         _wire_bridge(self)
         self._build_ui()
-        self._refresh()
+        # scan triggered in on_show to avoid blocking the constructor
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -1129,9 +1174,10 @@ class LogsPage(QWidget):
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-class SettingsPage(QWidget):
+class SettingsPage(QWidget, CancellableScanMixin):
     def __init__(self, host: QWidget) -> None:
         super().__init__()
+        CancellableScanMixin.__init__(self)
         win = host.window()
         self._cfg = getattr(win, "config", None)
         self._build_ui()
