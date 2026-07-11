@@ -38,6 +38,8 @@ def iter_files(root: str | os.PathLike,
     * Prunes any dir whose name is in ``skip_names`` (e.g. ``node_modules``).
     * Prunes any dir starting with one of ``skip_prefixes`` (default:
       dotfiles).
+    * Skips files whose name starts with any of ``skip_prefixes`` (so
+      a top-level ``.hidden`` file isn't enumerated).
     * Honours ``cancel`` between file emissions.
     """
     base = Path(root)
@@ -57,6 +59,8 @@ def iter_files(root: str | os.PathLike,
             and not any(d.startswith(p) for p in skip_prefixes)
         ]
         for fname in filenames:
+            if any(fname.startswith(p) for p in skip_prefixes):
+                continue
             fp = os.path.join(dirpath, fname)
             if cancel is not None and cancel.is_set():
                 return

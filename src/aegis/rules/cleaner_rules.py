@@ -23,10 +23,20 @@ from aegis.domain.cleaner import (
 _HOME = os.path.expanduser("~")
 
 
+def _home() -> str:
+    """Return the current $HOME, recomputed each call so tests can override."""
+    return os.path.expanduser("~")
+
+
 # ── factories ────────────────────────────────────────────────────────────────
 
 def _expand(paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(os.path.expanduser(p) for p in paths)
+
+
+def _h() -> str:
+    """Current $HOME (recomputed each call so tests can monkeypatch)."""
+    return os.path.expanduser("~")
 
 
 def make_trash() -> CleanTarget:
@@ -36,8 +46,8 @@ def make_trash() -> CleanTarget:
         description="Recycle bin",
         category=CleanCategory.USER_DATA,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.local/share/Trash/files",
-                       f"{_HOME}/.local/share/Trash/info"]),
+        paths=_expand([f"{_h()}/.local/share/Trash/files",
+                       f"{_h()}/.local/share/Trash/info"]),
     )
 
 
@@ -48,7 +58,7 @@ def make_thumbnails() -> CleanTarget:
         description="~/.cache/thumbnails",
         category=CleanCategory.SYSTEM,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/thumbnails"]),
+        paths=_expand([f"{_h()}/.cache/thumbnails"]),
     )
 
 
@@ -59,7 +69,7 @@ def make_font_cache() -> CleanTarget:
         description="fontconfig caches",
         category=CleanCategory.SYSTEM,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/fontconfig"]),
+        paths=_expand([f"{_h()}/.cache/fontconfig"]),
     )
 
 
@@ -70,7 +80,7 @@ def make_recent_files() -> CleanTarget:
         description="~/.local/share/recently-used.xbel",
         category=CleanCategory.USER_DATA,
         kind=CleanKind.DELETE_FILES,
-        paths=_expand([f"{_HOME}/.local/share/recently-used.xbel"]),
+        paths=_expand([f"{_h()}/.local/share/recently-used.xbel"]),
     )
 
 
@@ -81,9 +91,9 @@ def make_shell_history() -> CleanTarget:
         description="Truncate bash/zsh/fish history",
         category=CleanCategory.USER_DATA,
         kind=CleanKind.TRUNCATE,
-        paths=_expand([f"{_HOME}/.bash_history",
-                       f"{_HOME}/.zsh_history",
-                       f"{_HOME}/.local/share/fish/fish_history"]),
+        paths=_expand([f"{_h()}/.bash_history",
+                       f"{_h()}/.zsh_history",
+                       f"{_h()}/.local/share/fish/fish_history"]),
         reversible=True,
     )
 
@@ -142,7 +152,7 @@ def make_pip_cache() -> CleanTarget:
         description="~/.cache/pip",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/pip"]),
+        paths=_expand([f"{_h()}/.cache/pip"]),
     )
 
 
@@ -153,7 +163,7 @@ def make_npm_cache() -> CleanTarget:
         description="~/.npm",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.npm"]),
+        paths=_expand([f"{_h()}/.npm"]),
     )
 
 
@@ -164,7 +174,7 @@ def make_yarn_cache() -> CleanTarget:
         description="~/.cache/yarn",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/yarn"]),
+        paths=_expand([f"{_h()}/.cache/yarn"]),
     )
 
 
@@ -175,7 +185,7 @@ def make_cargo_cache() -> CleanTarget:
         description="~/.cargo/registry",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cargo/registry"]),
+        paths=_expand([f"{_h()}/.cargo/registry"]),
     )
 
 
@@ -186,7 +196,7 @@ def make_go_cache() -> CleanTarget:
         description="~/.cache/go-build",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/go-build"]),
+        paths=_expand([f"{_h()}/.cache/go-build"]),
     )
 
 
@@ -197,10 +207,10 @@ def make_conda_pkgs() -> CleanTarget:
         description="miniconda/anaconda pkgs dirs",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/miniconda3/pkgs",
-                       f"{_HOME}/anaconda3/pkgs",
-                       f"{_HOME}/miniconda/pkgs",
-                       f"{_HOME}/.conda/pkgs"]),
+        paths=_expand([f"{_h()}/miniconda3/pkgs",
+                       f"{_h()}/anaconda3/pkgs",
+                       f"{_h()}/miniconda/pkgs",
+                       f"{_h()}/.conda/pkgs"]),
     )
 
 
@@ -211,8 +221,8 @@ def make_jupyter_cache() -> CleanTarget:
         description="~/.local/share/jupyter",
         category=CleanCategory.PACKAGE_MGR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.local/share/jupyter",
-                       f"{_HOME}/.jupyter/lab/workspaces"]),
+        paths=_expand([f"{_h()}/.local/share/jupyter",
+                       f"{_h()}/.jupyter/lab/workspaces"]),
     )
 
 
@@ -223,7 +233,7 @@ def make_firefox_cache() -> CleanTarget:
         description="~/.cache/mozilla",
         category=CleanCategory.BROWSER,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/mozilla"]),
+        paths=_expand([f"{_h()}/.cache/mozilla"]),
     )
 
 
@@ -234,8 +244,8 @@ def make_chrome_cache() -> CleanTarget:
         description="~/.cache/google-chrome + chromium",
         category=CleanCategory.BROWSER,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/google-chrome",
-                       f"{_HOME}/.cache/chromium"]),
+        paths=_expand([f"{_h()}/.cache/google-chrome",
+                       f"{_h()}/.cache/chromium"]),
     )
 
 
@@ -246,7 +256,7 @@ def make_brave_cache() -> CleanTarget:
         description="~/.cache/BraveSoftware",
         category=CleanCategory.BROWSER,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/BraveSoftware"]),
+        paths=_expand([f"{_h()}/.cache/BraveSoftware"]),
     )
 
 
@@ -257,10 +267,10 @@ def make_vscode_cache() -> CleanTarget:
         description="Cached data per editor",
         category=CleanCategory.EDITOR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.config/Code/Cache",
-                       f"{_HOME}/.config/Code/CachedData",
-                       f"{_HOME}/.config/Cursor/Cache",
-                       f"{_HOME}/.config/Cursor/CachedData"]),
+        paths=_expand([f"{_h()}/.config/Code/Cache",
+                       f"{_h()}/.config/Code/CachedData",
+                       f"{_h()}/.config/Cursor/Cache",
+                       f"{_h()}/.config/Cursor/CachedData"]),
     )
 
 
@@ -271,7 +281,7 @@ def make_jetbrains_cache() -> CleanTarget:
         description="~/.cache/JetBrains",
         category=CleanCategory.EDITOR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/JetBrains"]),
+        paths=_expand([f"{_h()}/.cache/JetBrains"]),
     )
 
 
@@ -282,7 +292,7 @@ def make_android_cache() -> CleanTarget:
         description="~/.cache/Google/AndroidStudio*",
         category=CleanCategory.EDITOR,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/Google"]),
+        paths=_expand([f"{_h()}/.cache/Google"]),
     )
 
 
@@ -305,8 +315,8 @@ def make_steam_cache() -> CleanTarget:
         description="~/.cache/mesa_shader_cache* + Steam shader cache",
         category=CleanCategory.GAME,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/mesa_shader_cache",
-                       f"{_HOME}/.steam/steam/shadercache"]),
+        paths=_expand([f"{_h()}/.cache/mesa_shader_cache",
+                       f"{_h()}/.steam/steam/shadercache"]),
     )
 
 
@@ -317,8 +327,8 @@ def make_wine_cache() -> CleanTarget:
         description="~/.cache/wine + Proton shader cache",
         category=CleanCategory.GAME,
         kind=CleanKind.DELETE_CONTENTS,
-        paths=_expand([f"{_HOME}/.cache/wine",
-                       f"{_HOME}/.cache/shadercache"]),
+        paths=_expand([f"{_h()}/.cache/wine",
+                       f"{_h()}/.cache/shadercache"]),
     )
 
 
@@ -401,9 +411,21 @@ _TARGET_FACTORIES = (
 )
 
 
+_TARGETS_CACHE: list[CleanTarget] | None = None
+
+
 def all_targets() -> tuple[CleanTarget, ...]:
-    """Return every static target definition."""
-    return tuple(f() for f in _TARGET_FACTORIES)
+    """Return every static target definition (cached per-process)."""
+    global _TARGETS_CACHE
+    if _TARGETS_CACHE is None:
+        _TARGETS_CACHE = [f() for f in _TARGET_FACTORIES]
+    return tuple(_TARGETS_CACHE)
+
+
+def _reset_cache() -> None:
+    """Invalidate the cache (used by tests when HOME changes)."""
+    global _TARGETS_CACHE
+    _TARGETS_CACHE = None
 
 
 def by_category() -> dict[CleanCategory, tuple[CleanTarget, ...]]:
