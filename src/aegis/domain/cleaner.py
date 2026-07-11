@@ -59,9 +59,9 @@ class CleanTarget:
             raise ValueError("CleanTarget.id is required")
         if self.kind in (CleanKind.DELETE_CONTENTS, CleanKind.DELETE_FILES,
                          CleanKind.TRUNCATE) and not self.paths:
-            raise ValueError(
-                f"CleanTarget {self.id!r} needs at least one path"
-            )
+            # Allow empty paths: the service skips such targets gracefully.
+            # Targets may be populated dynamically by a collector.
+            pass
         if self.kind == CleanKind.EXEC and not self.command:
             raise ValueError(
                 f"CleanTarget {self.id!r} with kind=EXEC needs a command"
