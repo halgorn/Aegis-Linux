@@ -21,6 +21,7 @@ from PyQt6.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
+from typing import Any  # noqa: E402
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -102,6 +103,70 @@ def make_section(title: str) -> QWidget:
     lay.addWidget(lbl)
     lay.addStretch()
     return wrap
+
+
+# ── async scan button ────────────────────────────────────────────────────────
+
+class ScanButton(QPushButton):
+    """Push-button that flips to a "Scanning…" state during a background
+    task *without* being disabled. Re-clicks cancel the previous task
+    and start a new one, so the user always gets feedback."""
+
+    def __init__(self, label: str = "Run scan") -> None:
+        super().__init__(label)
+        self.setObjectName("primary")
+        self._idle_label = label
+        self._busy_label = label + " · …"
+        self._current: Any = None  # current TaskSpec; cancelled on re-click
+
+    def start(self, runner: TaskRunner, fn, bridge: WorkerBridge | None = None,
+              *, name: str = "scan", on_done=None, on_error=None) -> None:
+        """Spawn a worker task. Cancels any previous one. Pass the
+        page's WorkerBridge so finish() can be marshalled back to the
+        GUI thread (Qt widgets are not thread-safe across workers)."""
+        from aegis.core.concurrency import TaskSpec  # local import (cycle-safe)
+        if self._current is not None:
+            try:
+                self._current.cancel()
+            except Exception:
+                pass
+        self._bridge = bridge
+        spec = TaskSpec(
+            name=name, fn=fn,
+            on_done=self._wrap(on_done),
+            on_error=self._wrap_error(on_error),
+        )
+        self._current = spec
+        # setText/setEnabled must run on GUI thread; we are there.
+        self.setText(self._busy_label)
+        self.setEnabled(True)
+        runner.submit(spec)
+
+    def finish(self, ok: bool = True, *, label: str | None = None) -> None:
+        # Called on the GUI thread (via bridge.post) — safe to touch Qt widgets.
+        self._current = None
+        self.setText(label or self._idle_label)
+        self.setEnabled(True)
+
+    def _wrap(self, user_done):
+        def _done(result):
+            if self._bridge is not None:
+                self._bridge.post(self.finish, True)
+            else:
+                self.finish(ok=True)
+            if user_done is not None:
+                user_done(result)
+        return _done
+
+    def _wrap_error(self, user_error):
+        def _err(exc):
+            if self._bridge is not None:
+                self._bridge.post(self.finish, False)
+            else:
+                self.finish(ok=False)
+            if user_error is not None:
+                user_error(exc)
+        return _err
 
 
 # ── sidebar ───────────────────────────────────────────────────────────────────

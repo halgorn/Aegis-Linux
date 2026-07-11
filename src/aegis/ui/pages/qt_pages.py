@@ -59,6 +59,7 @@ from aegis.services.logs_service import tail as tail_logs
 from aegis.ui.theme import current, fmt_bytes
 from aegis.ui.widgets.qt import (
     Gauge,
+    ScanButton,
     Sparkline,
     WorkerBridge,
     make_kpi,
@@ -100,6 +101,22 @@ def _set_status(parent: QWidget, text: str) -> None:
         win.status.showMessage(text)
 
 
+def _run_scan(page: QWidget, *,
+              runner: TaskRunner, bridge: WorkerBridge,
+              name: str, fn, on_render) -> None:
+    """Submit a scan task with bounded error handling. The worker fn runs
+    off-thread; on success it bounces `on_render(result)` to the GUI
+    via the bridge; on failure it shows an error toast. Both paths
+    leave the UI in a usable state — no disabled widgets."""
+    def _done(result):
+        bridge.post(on_render, result)
+    def _err(exc):
+        bridge.post(lambda e=exc: _show_toast(
+            page, f"{name} failed: {e}", "error"))
+    (spec := TaskSpec(name=name, fn=fn, on_done=_done, on_error=_err))
+    runner.submit(spec)
+
+
 def _wire_bridge(page: QWidget) -> None:
     """Hook the page's WorkerBridge to dispatch tuple payloads."""
     win = page.window()
@@ -111,8 +128,9 @@ def _wire_bridge(page: QWidget) -> None:
             fn, args, kwargs = t
             try:
                 fn(*args, **kwargs)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 _log.warning("%s invoke failed: %s", page.__class__.__name__, e)
+                _show_toast(page, f"Render failed: {e}", "error")
     b.invoke.connect(_dispatch)
 
 
@@ -205,7 +223,10 @@ class DashboardPage(QWidget):
             _show_toast(self, f"Backup failed: {e}", "error")
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="dashboard-snapshot", fn=lambda: _dashboard_snapshot(), on_done=lambda snap: self._bridge.post(self._render, snap))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge,
+                  name="dashboard-snapshot",
+                  fn=_dashboard_snapshot,
+                  on_render=self._render)
 
     def _render(self, snap: dict) -> None:
         try:
@@ -303,8 +324,7 @@ class CleanerPage(QWidget):
         self._btn_none.clicked.connect(self._select_none)
         self._dryrun = QCheckBox("Dry run")
         self._dryrun.setChecked(True)
-        self._btn_scan = QPushButton("Scan")
-        self._btn_scan.setObjectName("primary")
+        self._btn_scan = ScanButton("Scan")
         self._btn_scan.clicked.connect(self._refresh)
         self._btn_clean = QPushButton("Clean selected")
         self._btn_clean.setObjectName("danger")
@@ -352,9 +372,15 @@ class CleanerPage(QWidget):
             cb.setChecked(False)
 
     def _refresh(self) -> None:
-        self._btn_scan.setEnabled(False)
         _set_status(self, "Scanning cleanable targets…")
-        (spec := TaskSpec(name="cleaner-scan", fn=lambda: self._scan_with_sizes(), on_done=lambda targets: self._bridge.post(self._render, targets))); self._runner.submit(spec)
+        def on_done(targets):
+            self._bridge.post(self._render, targets)
+        def on_error(exc):
+            self._bridge.post(lambda e=exc: _show_toast(self, f"Scan failed: {e}", "error"))
+        self._btn_scan.start(self._runner, fn=self._scan_with_sizes,
+                             bridge=self._bridge,
+                             name="cleaner-scan",
+                             on_done=on_done, on_error=on_error)
 
     @staticmethod
     def _scan_with_sizes() -> list:
@@ -383,7 +409,7 @@ class CleanerPage(QWidget):
             self._table.setItem(row, 3, QTableWidgetItem(fmt_bytes(t.estimated_size)))
             total += t.estimated_size
         self._total_lbl.setText(fmt_bytes(total))
-        self._btn_scan.setEnabled(True)
+        self._btn_scan.finish()
         _set_status(self, f"Found {len(targets)} cleanable targets.")
 
     def _on_select(self) -> None:
@@ -418,22 +444,36 @@ class CleanerPage(QWidget):
             )
             if r != QMessageBox.StandardButton.Yes:
                 return
+        if hasattr(self, "_btn_clean_busy") and self._btn_clean_busy:
+            return
+        self._btn_clean_busy = True
         self._btn_clean.setEnabled(False)
+        self._btn_clean.setText("Cleaning…")
         _set_status(self, "Cleaning…")
         dry = self._dryrun.isChecked()
-        (spec := TaskSpec(
-            name="cleaner-run",
-            fn=lambda: CleanerService().run(target_ids=ids, dry_run=dry, create_backup=not dry),
-            on_done=lambda res: self._bridge.post(self._on_clean_done, res),
-        )); self._runner.submit(spec)
+        def run():
+            try:
+                res = CleanerService().run(target_ids=ids, dry_run=dry, create_backup=not dry)
+                self._bridge.post(self._on_clean_done, res)
+            except Exception as e:  # noqa: BLE001
+                self._bridge.post(lambda exc=e: self._on_clean_error(exc))
+        (spec := TaskSpec(name="cleaner-run", fn=run)); self._runner.submit(spec)
 
     def _on_clean_done(self, res) -> None:
+        self._btn_clean_busy = False
         self._btn_clean.setEnabled(True)
+        self._btn_clean.setText("Clean selected")
         msg = (f"{'[DRY] ' if res.dry_run else ''}Reclaimed "
                f"{fmt_bytes(res.bytes_freed)} across {len(res.records)} items.")
         _show_toast(self, msg, "success")
         _set_status(self, msg)
         self._refresh()
+
+    def _on_clean_error(self, exc) -> None:
+        self._btn_clean_busy = False
+        self._btn_clean.setEnabled(True)
+        self._btn_clean.setText("Clean selected")
+        _show_toast(self, f"Clean failed: {exc}", "error")
 
 
 # ── Monitor ───────────────────────────────────────────────────────────────────
@@ -491,11 +531,10 @@ class MonitorPage(QWidget):
         self._timer.stop()
 
     def _tick(self) -> None:
-        (spec := TaskSpec(
-            name="monitor-sample",
-            fn=lambda: (self._svc.sample_once(), proc_col.list_processes(top=8)),
-            on_done=lambda payload: self._bridge.post(self._render, payload),
-        )); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge,
+                  name="monitor-sample",
+                  fn=lambda: (self._svc.sample_once(), proc_col.list_processes(top=8)),
+                  on_render=self._render)
 
     def _render(self, payload) -> None:
         s, procs = payload
@@ -554,12 +593,11 @@ class PerformancePage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(
-            name="perf-sample",
-            fn=lambda: (proc_col.list_processes(top=30),
-                        {k: sysfs_col.read_sysctl(k, "?") for k in self._tun_info}),
-            on_done=lambda payload: self._bridge.post(self._render, payload),
-        )); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge,
+                  name="perf-sample",
+                  fn=lambda: (proc_col.list_processes(top=30),
+                              {k: sysfs_col.read_sysctl(k, "?") for k in self._tun_info}),
+                  on_render=self._render)
 
     def _render(self, payload) -> None:
         procs, sysctl = payload
@@ -603,8 +641,7 @@ class HealthPage(QWidget):
         top.addWidget(info, 1)
         tw = QWidget(); tw.setLayout(top); outer.addWidget(tw)
         bar = QHBoxLayout()
-        self._btn_scan = QPushButton("Run scan")
-        self._btn_scan.setObjectName("primary")
+        self._btn_scan = ScanButton("Run scan")
         self._btn_scan.clicked.connect(self._refresh)
         bar.addWidget(self._btn_scan); bar.addStretch()
         bw = QWidget(); bw.setLayout(bar); outer.addWidget(bw)
@@ -620,12 +657,17 @@ class HealthPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        self._btn_scan.setEnabled(False)
         _set_status(self, "Scanning system health…")
-        (spec := TaskSpec(name="health-scan", fn=lambda: self._svc.run(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        def on_done(r):
+            self._bridge.post(self._render, r)
+        def on_error(exc):
+            self._bridge.post(lambda e=exc: _show_toast(self, f"Health scan failed: {e}", "error"))
+        self._btn_scan.start(self._runner, fn=self._svc.run,
+                             bridge=self._bridge,
+                             name="health-scan",
+                             on_done=on_done, on_error=on_error)
 
     def _render(self, r) -> None:
-        self._btn_scan.setEnabled(True)
         score = r.score
         grade = r.grade
         self._gauge.set_value(score)
@@ -670,7 +712,7 @@ class SecurityPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="sec-scan", fn=lambda: self._svc.scan(), on_done=lambda findings: self._bridge.post(self._render, findings))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="sec-scan", fn=lambda: self._svc.scan(), on_render=self._render)
 
     def _render(self, findings) -> None:
         self._tbl.setRowCount(len(findings))
@@ -715,7 +757,7 @@ class NetworkPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="net-scan", fn=lambda: scan_network(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="net-scan", fn=scan_network, on_render=self._render)
 
     def _render(self, r) -> None:
         ifaces = r.interfaces
@@ -764,7 +806,7 @@ class DisksPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="disks-scan", fn=lambda: scan_disks(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="disks-scan", fn=scan_disks, on_render=self._render)
 
     def _render(self, r) -> None:
         filesystems = r.filesystems
@@ -807,7 +849,7 @@ class DriversPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="drv-scan", fn=lambda: scan_drivers(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="drv-scan", fn=scan_drivers, on_render=self._render)
 
     def _render(self, r) -> None:
         mods = r.modules
@@ -844,7 +886,7 @@ class PackagesPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="pkg-scan", fn=lambda: scan_packages(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="pkg-scan", fn=scan_packages, on_render=self._render)
 
     def _render(self, r) -> None:
         pkgs = r.packages
@@ -880,7 +922,7 @@ class StartupPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="startup-scan", fn=lambda: scan_startup(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="startup-scan", fn=scan_startup, on_render=self._render)
 
     def _render(self, r) -> None:
         items = r.items
@@ -975,7 +1017,7 @@ class LogsPage(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        (spec := TaskSpec(name="logs-fetch", fn=lambda: tail_logs(lines=400), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+        _run_scan(self, runner=self._runner, bridge=self._bridge, name="logs-fetch", fn=lambda: tail_logs(lines=400), on_render=self._render)
 
     def _render(self, r) -> None:
         self._view.setPlainText("\n".join(r.lines))
