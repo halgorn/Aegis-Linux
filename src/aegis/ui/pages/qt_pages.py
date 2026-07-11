@@ -553,16 +553,16 @@ class CleanerPage(QWidget, CancellableScanMixin):
         def run():
             try:
                 res = CleanerService().run(target_ids=ids, dry_run=dry, create_backup=not dry)
-                self._bridge.post(self._on_clean_done, res)
+                self._bridge.post(self._on_clean_done, res, dry)
             except Exception as e:  # noqa: BLE001
                 self._bridge.post(lambda exc=e: self._on_clean_error(exc))
         (spec := TaskSpec(name="cleaner-run", fn=run)); self._runner.submit(spec)
 
-    def _on_clean_done(self, res) -> None:
+    def _on_clean_done(self, res, dry: bool) -> None:
         self._btn_clean_busy = False
         self._btn_clean.setEnabled(True)
         self._btn_clean.setText("Clean selected")
-        msg = (f"{'[DRY] ' if res.dry_run else ''}Reclaimed "
+        msg = (f"{'[DRY] ' if dry else ''}Reclaimed "
                f"{fmt_bytes(res.bytes_freed)} across {len(res.records)} items.")
         _show_toast(self, msg, "success")
         _set_status(self, msg)

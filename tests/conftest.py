@@ -8,6 +8,11 @@ from collections.abc import Iterator
 
 import pytest
 
+# Force Qt offscreen platform before any test imports PyQt6 — so
+# the integration tests under tests/integration_gui can run on
+# headless CI workers without a display.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 
 @pytest.fixture()
 def tmp_home(monkeypatch) -> Iterator[str]:
