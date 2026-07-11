@@ -617,7 +617,7 @@ class HealthPage(QWidget):
         outer.addWidget(self._tbl, 1)
 
     def on_show(self) -> None:
-        pass
+        self._refresh()
 
     def _refresh(self) -> None:
         self._btn_scan.setEnabled(False)
