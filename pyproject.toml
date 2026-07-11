@@ -25,6 +25,7 @@ classifiers = [
 
 dependencies = [
     "platformdirs>=4.0",
+    "PyQt6>=6.6",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +42,7 @@ gpu = ["nvidia-ml-py3>=7.352"]  # optional NVIDIA telemetry
 [project.scripts]
 aegis = "aegis.cli:main"
 aegis-linux = "aegis.cli:main"
+aegis-qt = "aegis.ui.app_qt:launch_gui"
 
 [project.urls]
 Homepage = "https://github.com/halgorn/Aegis-Linux"

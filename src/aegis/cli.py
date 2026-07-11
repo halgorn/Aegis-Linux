@@ -27,7 +27,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-gui",
         action="store_true",
-        help="force headless mode (no Tk window)",
+        help="force headless mode (no Qt window)",
+    )
+    p.add_argument(
+        "--tk",
+        action="store_true",
+        help="use the Tk fallback UI instead of Qt6",
     )
     p.add_argument(
         "--doctor",
@@ -88,11 +93,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     # Default: launch GUI.
+    if args.tk:
+        try:
+            from aegis.ui.app import launch_gui as tk_launch
+            return tk_launch()
+        except ImportError as exc:
+            print(f"error: Tk GUI not available: {exc}", file=sys.stderr)
+            return 3
+
     try:
-        from aegis.ui.app import launch_gui
+        from aegis.ui.app_qt import launch_gui
     except ImportError as exc:
-        print(f"error: GUI not available: {exc}", file=sys.stderr)
-        print("hint: install tkinter or use --doctor / --headless-clean", file=sys.stderr)
+        print(f"error: Qt GUI not available: {exc}", file=sys.stderr)
+        print("hint: install PyQt6 or use --tk / --doctor / --headless-clean",
+              file=sys.stderr)
         return 3
 
     return launch_gui()

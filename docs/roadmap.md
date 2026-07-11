@@ -35,17 +35,17 @@ See [Architecture](architecture.md) for the layer model.
 - [x] `services/monitor_service.py` (1Hz periodic sampler)
 
 ## ✅ Fase 3 — UI
-- [x] `ui/theme.py` (dark + light palette, 4 accents)
-- [x] `ui/widgets/common.py` (button, Card, ProgressBar, apply_tree_style)
-- [x] `ui/widgets/scrollable.py` (per-canvas wheel binding, no `bind_all` leak)
-- [x] `ui/widgets/charts.py` (Sparkline, Gauge)
-- [x] `ui/widgets/toast.py`, `ui/widgets/confirm_dialog.py`,
-      `ui/widgets/sidebar.py`
-- [x] `ui/pages/dashboard.py`, `cleaner.py`, `health.py`, `security.py`,
-      `monitor.py`, `performance.py`, `network.py`, `disks.py`,
-      `drivers.py`, `packages.py`, `startup.py`, `logs.py`,
-      `restore_points.py`, `settings.py`
-- [x] `ui/app.py` (root window, sidebar nav, lazy page construction)
+- [x] `ui/theme.py` (dark + light palette, 4 accents, Qt + Tk compatible)
+- [x] `ui/widgets/qt.py` (Sidebar with QListWidget, Sparkline + Gauge via QPainter,
+      ToastHost with QPropertyAnimation, WorkerBridge for thread→UI marshalling,
+      ScrollPage wrapper, Card / KPI helpers)
+- [x] `ui/pages/qt_pages.py` (14 pages: Dashboard, Cleaner, Monitor,
+      Performance, Health, Security, Network, Disks, Drivers, Packages,
+      Startup, Restore, Logs, Settings — all wired to the WorkerBridge)
+- [x] `ui/app_qt.py` (QApplication + QStackedWidget + sidebar nav + status bar)
+- [x] Tk fallback retained at `ui/app.py` + `ui/widgets/*.py` (legacy);
+      launch with `aegis --tk`
+- [x] Cap `dir_size` walk at 50k files / 3s so giant trash dirs don't stall UI
 
 ## ✅ Fase 4 — Reliability
 - [x] Backup before destructive ops (configurable)
@@ -59,6 +59,21 @@ See [Architecture](architecture.md) for the layer model.
 - [x] Network diagnostics (interfaces, ports, ping, DNS, firewall)
 - [x] Disk health (SMART, TRIM, gauges)
 - [x] Drivers inventory (PCI/USB/DKMS/microcode/firmware)
+
+## ✅ Fase 12 — Qt6 Port (GUI rewrite)
+- [x] PyQt6 added as a runtime dep (Qt wheels install natively on Linux)
+- [x] Single QApplication shell with sidebar (QListWidget) + QStackedWidget
+- [x] Themed via QSS (rounded cards, accent buttons, dark + light, 4 accents)
+- [x] Custom QPainter Sparkline (fill + stroke) and Gauge (arc + label)
+- [x] WorkerBridge: thread-safe `post(fn, *args, **kwargs)` → `pyqtSignal`
+      emits a `(fn, args, kwargs)` tuple; each page marshals back to the
+      main thread without an explicit queue per page
+- [x] 14 pages ported, all data-driven from existing services / collectors
+      (no business-logic duplication — only the rendering layer changed)
+- [x] Size scan capped (3s / 50k files) so the trash walk can't freeze the UI
+- [x] Existing 55-test suite still green
+- [x] Tk implementation retained as `--tk` fallback for environments
+      without Qt (no regressions)
 
 ## ✅ Fase 10 — Quality (partial)
 - [x] 55 unit tests (domain, core, filesystem, cleaner)

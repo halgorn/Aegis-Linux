@@ -29,10 +29,12 @@ src/aegis/
 ├── persistence/  config, history, metrics cache
 ├── plugins/      plugin system (Fase 8)
 ├── daemon/       background service (Fase 7)
-└── ui/           presentation layer
-    ├── theme.py        palette + fonts + theme switching
+└── ui/           presentation layer (Qt6 primary, Tk fallback)
+    ├── theme.py        palette + QSS / Tk styling
     ├── widgets/        reusable widgets (cards, charts, gauges)
-    └── pages/          one file per page
+    ├── pages/          one file per page (14 pages, all wired)
+    └── app_qt.py       QApplication + QStackedWidget (default)
+    └── app.py          Tk fallback (use `aegis --tk`)
 ```
 
 Each module has a single responsibility, exposes a small surface,
@@ -114,11 +116,16 @@ register_collector, register_page.
 ```bash
 git clone https://github.com/halgorn/Aegis-Linux.git
 cd Aegis-Linux
-pip install -e .
-aegis                       # launch GUI
-aegis --headless-clean      # CLI cleanup
-aegis --doctor              # health check
+pip install -e .              # installs PyQt6 + platformdirs
+aegis                         # launch Qt6 GUI (14 pages)
+aegis --doctor                # health check (no GUI)
+aegis --headless-clean --dry-run   # preview cleanup targets
+aegis --no-gui --doctor       # explicit headless
+aegis --tk                    # use the Tk fallback UI
 ```
+
+> PyQt6 is the default since v0.2. The Tkinter fallback (`aegis --tk`)
+> remains available for environments where Qt is not installed.
 
 ### Distribution packages (planned)
 

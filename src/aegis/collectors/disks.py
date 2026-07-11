@@ -136,18 +136,27 @@ def used_bytes(path: str = "/") -> int:
 
 # ── in-process disk usage (replaces du) ──────────────────────────────────────
 
-def dir_size(path: str | os.PathLike) -> int:
-    """Sum of file sizes under ``path``. Follows symlinks per :func:`os.walk`.
+def dir_size(path: str | os.PathLike, *,
+              max_files: int = 50_000,
+              max_time_s: float = 3.0) -> int:
+    """Sum of file sizes under ``path``.
 
-    Returns 0 if the path doesn't exist or isn't readable. Skips
-    mount points and FIFOs to avoid double-counting and hanging.
+    Capped at ``max_files`` entries and ``max_time_s`` wall-clock seconds so
+    a giant trash directory doesn't stall the UI scan. When the cap is
+    reached the partial sum is returned (and the caller should treat it as
+    "≥ this much"). Returns 0 if the path doesn't exist.
     """
     root = Path(path)
     if not root.exists():
         return 0
     total = 0
+    n_files = 0
+    import time as _t
+    started = _t.monotonic()
     try:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            if _t.monotonic() - started > max_time_s or n_files >= max_files:
+                break
             # Don't cross filesystem boundaries
             try:
                 if os.stat(dirpath).st_dev != os.stat(root).st_dev:
@@ -157,6 +166,8 @@ def dir_size(path: str | os.PathLike) -> int:
                 dirnames.clear()
                 continue
             for fname in filenames:
+                if n_files >= max_files:
+                    break
                 fp = os.path.join(dirpath, fname)
                 try:
                     st = os.lstat(fp)
@@ -165,6 +176,9 @@ def dir_size(path: str | os.PathLike) -> int:
                 if not os.path.isfile(fp) or os.path.islink(fp):
                     continue
                 total += st.st_size
+                n_files += 1
+                if n_files % 1000 == 0 and _t.monotonic() - started > max_time_s:
+                    break
     except OSError as exc:
         _log.debug("dir_size(%s) failed: %s", root, exc)
     return total

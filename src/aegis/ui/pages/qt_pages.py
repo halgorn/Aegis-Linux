@@ -1,0 +1,1066 @@
+"""Qt pages — one factory per route.
+
+Single file because they share the same parent (``MainWindow``) and
+the same widget composition patterns; splitting them per-file would
+just multiply imports without buying anything.
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from aegis.collectors import procfs as proc_col
+from aegis.collectors import sysfs as sysfs_col
+from aegis.collectors.disks import read_mounts
+from aegis.collectors import browser as browser_col
+from aegis.core.concurrency import TaskRunner, TaskSpec
+from aegis.core.logging import get_logger
+from aegis.domain.cleaner import CleanResult
+from aegis.rules.cleaner_rules import all_targets
+from aegis.services import backup_service as backup_svc
+from aegis.services.cleaner_service import CleanerService
+from aegis.services.health_service import HealthService
+from aegis.services.monitor_service import MonitorService
+from aegis.services.security_service import SecurityService
+from aegis.services.network_service import scan as scan_network
+from aegis.services.disks_service import scan as scan_disks
+from aegis.services.drivers_service import scan as scan_drivers
+from aegis.services.packages_service import scan as scan_packages
+from aegis.services.startup_service import scan as scan_startup
+from aegis.services.logs_service import tail as tail_logs
+from aegis.ui.theme import current, fmt_bytes
+from aegis.ui.widgets.qt import (
+    Gauge,
+    Sparkline,
+    WorkerBridge,
+    make_kpi,
+    make_section,
+    make_title,
+)
+
+
+_log = get_logger(__name__)
+
+
+# ── shared helpers ────────────────────────────────────────────────────────────
+
+def _bridge(host: QWidget) -> WorkerBridge:
+    win = host.window()
+    if win is None:
+        return WorkerBridge(host)
+    if not hasattr(win, "_bridge"):
+        win._bridge = WorkerBridge(win)  # type: ignore[attr-defined]
+    return win._bridge  # type: ignore[attr-defined]
+
+
+def _runner(host: QWidget) -> TaskRunner:
+    win = host.window()
+    if not hasattr(win, "_runner"):
+        win._runner = TaskRunner()  # type: ignore[attr-defined]
+    return win._runner  # type: ignore[attr-defined]
+
+
+def _show_toast(parent: QWidget, text: str, kind: str = "info") -> None:
+    win = parent.window()
+    if hasattr(win, "show_toast"):
+        win.show_toast(text, kind=kind)
+
+
+def _set_status(parent: QWidget, text: str) -> None:
+    win = parent.window()
+    if hasattr(win, "status"):
+        win.status.showMessage(text)
+
+
+def _wire_bridge(page: QWidget) -> None:
+    """Hook the page's WorkerBridge to dispatch tuple payloads."""
+    win = page.window()
+    b = getattr(win, "_bridge", None)
+    if b is None:
+        return
+    def _dispatch(t):
+        if isinstance(t, tuple) and len(t) == 3:
+            fn, args, kwargs = t
+            try:
+                fn(*args, **kwargs)
+            except Exception as e:
+                _log.warning("%s invoke failed: %s", page.__class__.__name__, e)
+    b.invoke.connect(_dispatch)
+
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+
+class DashboardPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._refresh)
+        self._build_ui()
+        self._timer.start()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(14)
+        hour = datetime.now().hour
+        greet = ("Good morning" if hour < 12
+                 else "Good afternoon" if hour < 18
+                 else "Good evening")
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+        host_name = socket.gethostname()
+        outer.addWidget(make_title(
+            f"{greet}, {user}",
+            f"Welcome to Aegis Linux on {host_name}. Here's an overview of your system.",
+        ))
+        self._kpi_cpu = make_kpi("CPU", "—", "blue")
+        self._kpi_ram = make_kpi("Memory", "—", "mauve")
+        self._kpi_disk = make_kpi("Disk", "—", "green")
+        self._kpi_uptime = make_kpi("Uptime", "—", "cyan")
+        grid = QGridLayout(); grid.setSpacing(12)
+        grid.addWidget(self._kpi_cpu, 0, 0)
+        grid.addWidget(self._kpi_ram, 0, 1)
+        grid.addWidget(self._kpi_disk, 0, 2)
+        grid.addWidget(self._kpi_uptime, 0, 3)
+        gw = QWidget(); gw.setLayout(grid)
+        outer.addWidget(gw)
+        outer.addWidget(make_section("System"))
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        info = QFrame(); info.setObjectName("card")
+        il = QVBoxLayout(info)
+        il.setContentsMargins(16, 14, 16, 14)
+        il.setSpacing(6)
+        self._info_lines: dict[str, QLabel] = {}
+        for k in ("Distro", "Kernel", "Python", "CPU Model",
+                  "CPU Cores", "Total RAM", "Total Disk"):
+            row = QHBoxLayout()
+            lk = QLabel(k); lk.setObjectName("kpi_label"); lk.setFixedWidth(120)
+            lv = QLabel("—")
+            row.addWidget(lk); row.addWidget(lv, 1)
+            rw = QWidget(); rw.setLayout(row)
+            il.addWidget(rw)
+            self._info_lines[k] = lv
+        split.addWidget(info)
+        qa = QFrame(); qa.setObjectName("card")
+        ql = QVBoxLayout(qa); ql.setContentsMargins(16, 14, 16, 14); ql.setSpacing(8)
+        ql.addWidget(QLabel("Quick actions"))
+        for label, fn in (
+            ("Run health scan", lambda: self._navigate("health")),
+            ("Open cleaner", lambda: self._navigate("cleaner")),
+            ("Open monitor", lambda: self._navigate("monitor")),
+            ("Backup now", self._backup_now),
+        ):
+            b = QPushButton(label); b.clicked.connect(fn); ql.addWidget(b)
+        ql.addStretch()
+        split.addWidget(qa)
+        split.setSizes([640, 320])
+        outer.addWidget(split, 1)
+
+    def _navigate(self, key: str) -> None:
+        win = self.window()
+        if hasattr(win, "show_page"):
+            win.show_page(key)
+
+    def _backup_now(self) -> None:
+        try:
+            entry = backup_svc.snapshot_files(
+                [str(Path.home() / ".bashrc"), str(Path.home() / ".profile")],
+                reason="manual-dashboard",
+            )
+            _show_toast(self, f"Backup #{entry.id} created.", "success")
+        except Exception as e:  # noqa: BLE001
+            _show_toast(self, f"Backup failed: {e}", "error")
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="dashboard-snapshot", fn=lambda: _dashboard_snapshot(), on_done=lambda snap: self._bridge.post(self._render, snap))); self._runner.submit(spec)
+
+    def _render(self, snap: dict) -> None:
+        try:
+            self._kpi_cpu._value_lbl.setText(f"{snap['cpu_pct']:.0f}%")  # type: ignore[attr-defined]
+            self._kpi_ram._value_lbl.setText(  # type: ignore[attr-defined]
+                f"{snap['ram_pct']:.0f}% · {fmt_bytes(snap['ram_used'])}"
+            )
+            self._kpi_disk._value_lbl.setText(  # type: ignore[attr-defined]
+                f"{snap['disk_pct']:.0f}% · {fmt_bytes(snap['disk_used'])}"
+            )
+            self._kpi_uptime._value_lbl.setText(snap['uptime'])  # type: ignore[attr-defined]
+            mapping = {
+                "Distro": snap.get("distro"),
+                "Kernel": snap.get("kernel"),
+                "Python": snap.get("python"),
+                "CPU Model": snap.get("cpu_model"),
+                "CPU Cores": snap.get("cpu_cores"),
+                "Total RAM": fmt_bytes(snap.get("ram_total", 0)),
+                "Total Disk": fmt_bytes(snap.get("disk_total", 0)),
+            }
+            for k, v in mapping.items():
+                if k in self._info_lines and v is not None:
+                    self._info_lines[k].setText(str(v))
+        except Exception as e:  # noqa: BLE001
+            _log.warning("dashboard render failed: %s", e)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+
+def _dashboard_snapshot() -> dict:
+    cpu = proc_col.read_cpu_sample()
+    mem = proc_col.read_meminfo()
+    mounts = read_mounts()
+    root = next((m for m in mounts if m.mount == "/"), mounts[0] if mounts else None)
+    bo = time.time() - proc_col.read_uptime_s()
+    up_secs = int(time.time() - bo)
+    days, rem = divmod(up_secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    uptime = f"{days}d {hours}h {mins}m"
+    return {
+        "cpu_pct": cpu.avg_pct,
+        "ram_pct": mem.used_pct * 100,
+        "ram_used": mem.used,
+        "ram_total": mem.total,
+        "disk_pct": (root.used / root.size * 100) if root and root.size else 0,
+        "disk_used": root.used if root else 0,
+        "disk_total": root.size if root else 0,
+        "uptime": uptime,
+        "distro": _read_os_release(),
+        "kernel": platform.release(),
+        "python": platform.python_version(),
+        "cpu_model": (platform.processor() or "unknown")[:60],
+        "cpu_cores": os.cpu_count() or 0,
+    }
+
+
+def _read_os_release() -> str:
+    try:
+        txt = Path("/etc/os-release").read_text()
+        for line in txt.splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return platform.system()
+
+
+# ── Cleaner ───────────────────────────────────────────────────────────────────
+
+class CleanerPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._targets: list = []
+        self._checks: dict[str, QCheckBox] = {}
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(12)
+        outer.addWidget(make_title(
+            "Cleaner",
+            "Select what to clean. Dry-run is on by default — no files are removed until you confirm.",
+        ))
+        bar = QHBoxLayout()
+        self._btn_all = QPushButton("Select all")
+        self._btn_all.clicked.connect(self._select_all)
+        self._btn_none = QPushButton("Select none")
+        self._btn_none.clicked.connect(self._select_none)
+        self._dryrun = QCheckBox("Dry run")
+        self._dryrun.setChecked(True)
+        self._btn_scan = QPushButton("Scan")
+        self._btn_scan.setObjectName("primary")
+        self._btn_scan.clicked.connect(self._refresh)
+        self._btn_clean = QPushButton("Clean selected")
+        self._btn_clean.setObjectName("danger")
+        self._btn_clean.clicked.connect(self._clean)
+        bar.addWidget(self._btn_all)
+        bar.addWidget(self._btn_none)
+        bar.addSpacing(20)
+        bar.addWidget(QLabel("Total reclaimable:"))
+        self._total_lbl = QLabel("—")
+        self._total_lbl.setStyleSheet("font-weight: 600;")
+        bar.addWidget(self._total_lbl)
+        bar.addStretch()
+        bar.addWidget(self._dryrun)
+        bar.addWidget(self._btn_scan)
+        bar.addWidget(self._btn_clean)
+        bw = QWidget(); bw.setLayout(bar)
+        outer.addWidget(bw)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["", "Target", "Description", "Estimated size"])
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        split.addWidget(self._table)
+
+        detail = QFrame(); detail.setObjectName("card")
+        dl = QVBoxLayout(detail); dl.setContentsMargins(16, 14, 16, 14); dl.setSpacing(6)
+        dl.addWidget(QLabel("Selection details"))
+        self._detail = QTextEdit(); self._detail.setReadOnly(True)
+        dl.addWidget(self._detail, 1)
+        split.addWidget(detail)
+        split.setSizes([820, 380])
+        outer.addWidget(split, 1)
+        self._table.itemSelectionChanged.connect(self._on_select)
+
+    def _select_all(self) -> None:
+        for cb in self._checks.values():
+            cb.setChecked(True)
+
+    def _select_none(self) -> None:
+        for cb in self._checks.values():
+            cb.setChecked(False)
+
+    def _refresh(self) -> None:
+        self._btn_scan.setEnabled(False)
+        _set_status(self, "Scanning cleanable targets…")
+        (spec := TaskSpec(name="cleaner-scan", fn=lambda: self._scan_with_sizes(), on_done=lambda targets: self._bridge.post(self._render, targets))); self._runner.submit(spec)
+
+    @staticmethod
+    def _scan_with_sizes() -> list:
+        from aegis.services.cleaner_service import _estimate_target_size
+        from aegis.domain.cleaner import CleanKind
+        out = []
+        for t in all_targets():
+            size = _estimate_target_size(t) if t.kind != CleanKind.EXEC else 0
+            object.__setattr__(t, "estimated_size", size or 0)
+            out.append(t)
+        return out
+
+    def _render(self, targets) -> None:
+        self._targets = targets
+        self._checks.clear()
+        self._table.setRowCount(len(targets))
+        total = 0
+        for row, t in enumerate(targets):
+            cb = QCheckBox()
+            self._checks[t.id] = cb
+            cw = QWidget(); cl = QHBoxLayout(cw); cl.setContentsMargins(8, 0, 8, 0)
+            cl.addWidget(cb); cl.addStretch()
+            self._table.setCellWidget(row, 0, cw)
+            self._table.setItem(row, 1, QTableWidgetItem(t.label))
+            self._table.setItem(row, 2, QTableWidgetItem(t.description))
+            self._table.setItem(row, 3, QTableWidgetItem(fmt_bytes(t.estimated_size)))
+            total += t.estimated_size
+        self._total_lbl.setText(fmt_bytes(total))
+        self._btn_scan.setEnabled(True)
+        _set_status(self, f"Found {len(targets)} cleanable targets.")
+
+    def _on_select(self) -> None:
+        rows = self._table.selectionModel().selectedRows()
+        if not rows:
+            self._detail.clear(); return
+        idx = rows[0].row()
+        t = self._targets[idx]
+        self._detail.setPlainText(
+            f"<b>{t.label}</b><br><br>"
+            f"<i>{t.description}</i><br><br>"
+            f"<b>Category:</b> {t.category}<br>"
+            f"<b>Kind:</b> {t.kind}<br>"
+            f"<b>Needs root:</b> {t.needs_root}<br>"
+            f"<b>Reversible:</b> {t.reversible}<br>"
+            f"<b>Estimated:</b> {fmt_bytes(t.estimated_size)}<br>"
+            f"<b>Path count:</b> {len(t.paths)}<br>"
+            f"<br><b>Paths:</b><br>"
+            + "<br>".join(f"  • {p}" for p in t.paths[:30])
+            + (f"<br>  … +{len(t.paths) - 30} more" if len(t.paths) > 30 else "")
+        )
+
+    def _clean(self) -> None:
+        ids = [tid for tid, cb in self._checks.items() if cb.isChecked()]
+        if not ids:
+            _show_toast(self, "No targets selected.", "warn"); return
+        if not self._dryrun.isChecked():
+            r = QMessageBox.question(
+                self, "Confirm cleanup",
+                f"Delete files from {len(ids)} targets?\n"
+                "This action is reversible only via the Restore page if a backup was made.",
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        self._btn_clean.setEnabled(False)
+        _set_status(self, "Cleaning…")
+        dry = self._dryrun.isChecked()
+        (spec := TaskSpec(
+            name="cleaner-run",
+            fn=lambda: CleanerService().run(target_ids=ids, dry_run=dry, create_backup=not dry),
+            on_done=lambda res: self._bridge.post(self._on_clean_done, res),
+        )); self._runner.submit(spec)
+
+    def _on_clean_done(self, res) -> None:
+        self._btn_clean.setEnabled(True)
+        msg = (f"{'[DRY] ' if res.dry_run else ''}Reclaimed "
+               f"{fmt_bytes(res.bytes_freed)} across {len(res.records)} items.")
+        _show_toast(self, msg, "success")
+        _set_status(self, msg)
+        self._refresh()
+
+
+# ── Monitor ───────────────────────────────────────────────────────────────────
+
+class MonitorPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._svc = MonitorService()
+        self._samples: list = []
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(12)
+        outer.addWidget(make_title("Monitor", "Live CPU, memory, disk and network usage."))
+        gw = QHBoxLayout(); gw.setSpacing(12)
+        self._g_cpu = Gauge("CPU", 110)
+        self._g_ram = Gauge("RAM", 110)
+        self._g_disk = Gauge("DISK", 110)
+        self._g_net = Gauge("NET", 110)
+        for g in (self._g_cpu, self._g_ram, self._g_disk, self._g_net):
+            gw.addWidget(g)
+        gw_w = QWidget(); gw_w.setLayout(gw); outer.addWidget(gw_w)
+        outer.addWidget(make_section("History (last 60 s)"))
+        sw = QHBoxLayout(); sw.setSpacing(12)
+        self._s_cpu = Sparkline(60, "blue")
+        self._s_ram = Sparkline(60, "mauve")
+        self._s_disk = Sparkline(60, "green")
+        self._s_net = Sparkline(60, "cyan")
+        for s, name in ((self._s_cpu, "CPU"), (self._s_ram, "RAM"),
+                        (self._s_disk, "DISK"), (self._s_net, "NET")):
+            box = QFrame(); box.setObjectName("card")
+            bl = QVBoxLayout(box); bl.setContentsMargins(12, 8, 12, 8)
+            bl.addWidget(QLabel(name)); bl.addWidget(s, 1)
+            sw.addWidget(box)
+        sw_w = QWidget(); sw_w.setLayout(sw); outer.addWidget(sw_w, 1)
+        outer.addWidget(make_section("Top CPU"))
+        self._top = QTableWidget(0, 3)
+        self._top.setHorizontalHeaderLabels(["PID", "Name", "CPU %"])
+        self._top.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._top.verticalHeader().setVisible(False)
+        outer.addWidget(self._top, 1)
+
+    def on_show(self) -> None:
+        self._timer.start(); self._tick()
+
+    def on_hide(self) -> None:
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        (spec := TaskSpec(
+            name="monitor-sample",
+            fn=lambda: (self._svc.sample_once(), proc_col.list_processes(top=8)),
+            on_done=lambda payload: self._bridge.post(self._render, payload),
+        )); self._runner.submit(spec)
+
+    def _render(self, payload) -> None:
+        s, procs = payload
+        self._samples.append(s)
+        self._samples = self._samples[-120:]
+        cpu, mem, disk = s.cpu_pct, s.mem_pct * 100, s.disk_used_pct
+        net = min(100.0, (s.rx_kbps + s.tx_kbps) / 1024.0)
+        self._g_cpu.set_value(cpu)
+        self._g_ram.set_value(mem)
+        self._g_disk.set_value(disk)
+        self._g_net.set_value(net)
+        self._s_cpu.push(cpu)
+        self._s_ram.push(mem)
+        self._s_disk.push(disk)
+        self._s_net.push(net)
+        self._top.setRowCount(len(procs))
+        for i, p in enumerate(procs):
+            self._top.setItem(i, 0, QTableWidgetItem(str(p.pid)))
+            self._top.setItem(i, 1, QTableWidgetItem(p.name[:30]))
+            self._top.setItem(i, 2, QTableWidgetItem(f"{p.cpu_pct:.1f}"))
+
+
+# ── Performance ───────────────────────────────────────────────────────────────
+
+class PerformancePage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(12)
+        outer.addWidget(make_title("Performance",
+            "Top processes and tunable kernel parameters."))
+        outer.addWidget(make_section("Top processes (by CPU)"))
+        self._tbl = QTableWidget(0, 5)
+        self._tbl.setHorizontalHeaderLabels(["PID", "Name", "CPU %", "RSS", "User"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setAlternatingRowColors(True)
+        outer.addWidget(self._tbl, 1)
+        outer.addWidget(make_section("Tunables"))
+        self._tun_info: dict[str, QLabel] = {}
+        tun_w = QWidget(); tun_l = QFormLayout(tun_w)
+        for k in ("vm.swappiness", "vm.dirty_ratio", "vm.dirty_background_ratio"):
+            lbl = QLabel("—"); tun_l.addRow(QLabel(k), lbl)
+            self._tun_info[k] = lbl
+        outer.addWidget(tun_w)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(
+            name="perf-sample",
+            fn=lambda: (proc_col.list_processes(top=30),
+                        {k: sysfs_col.read_sysctl(k, "?") for k in self._tun_info}),
+            on_done=lambda payload: self._bridge.post(self._render, payload),
+        )); self._runner.submit(spec)
+
+    def _render(self, payload) -> None:
+        procs, sysctl = payload
+        self._tbl.setRowCount(len(procs))
+        for i, p in enumerate(procs):
+            self._tbl.setItem(i, 0, QTableWidgetItem(str(p.pid)))
+            self._tbl.setItem(i, 1, QTableWidgetItem(p.name[:30]))
+            self._tbl.setItem(i, 2, QTableWidgetItem(f"{p.cpu_pct:.1f}"))
+            self._tbl.setItem(i, 3, QTableWidgetItem(fmt_bytes(p.rss)))
+            self._tbl.setItem(i, 4, QTableWidgetItem((p.user or "")[:20]))
+        for k, v in sysctl.items():
+            if k in self._tun_info:
+                self._tun_info[k].setText(str(v))
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+class HealthPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._svc = HealthService()
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(12)
+        outer.addWidget(make_title("Health", "System wellness score (0–100)."))
+        top = QHBoxLayout()
+        self._gauge = Gauge("Score", 160); top.addWidget(self._gauge)
+        info = QFrame(); info.setObjectName("card")
+        il = QVBoxLayout(info); il.setContentsMargins(16, 14, 16, 14)
+        il.addWidget(QLabel("Summary"))
+        self._summary = QLabel("Run a scan to compute the score.")
+        self._summary.setWordWrap(True)
+        il.addWidget(self._summary)
+        top.addWidget(info, 1)
+        tw = QWidget(); tw.setLayout(top); outer.addWidget(tw)
+        bar = QHBoxLayout()
+        self._btn_scan = QPushButton("Run scan")
+        self._btn_scan.setObjectName("primary")
+        self._btn_scan.clicked.connect(self._refresh)
+        bar.addWidget(self._btn_scan); bar.addStretch()
+        bw = QWidget(); bw.setLayout(bar); outer.addWidget(bw)
+        outer.addWidget(make_section("Issues"))
+        self._tbl = QTableWidget(0, 4)
+        self._tbl.setHorizontalHeaderLabels(["Code", "Severity", "Title", "Detail"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setAlternatingRowColors(True)
+        outer.addWidget(self._tbl, 1)
+
+    def on_show(self) -> None:
+        pass
+
+    def _refresh(self) -> None:
+        self._btn_scan.setEnabled(False)
+        _set_status(self, "Scanning system health…")
+        (spec := TaskSpec(name="health-scan", fn=lambda: self._svc.run(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        self._btn_scan.setEnabled(True)
+        score = r.score
+        grade = r.grade
+        self._gauge.set_value(score)
+        crit = sum(1 for i in r.issues if i.severity >= 3)
+        warn = sum(1 for i in r.issues if i.severity == 2)
+        self._summary.setText(
+            f"<b>{score}/100 (grade {grade})</b><br>"
+            f"{len(r.issues)} issues: {crit} critical, {warn} warning."
+        )
+        self._tbl.setRowCount(len(r.issues))
+        for i, p in enumerate(r.issues):
+            self._tbl.setItem(i, 0, QTableWidgetItem(p.code))
+            self._tbl.setItem(i, 1, QTableWidgetItem(p.severity.label.upper()))
+            self._tbl.setItem(i, 2, QTableWidgetItem(p.title))
+            self._tbl.setItem(i, 3, QTableWidgetItem(p.detail[:120]))
+
+
+# ── Security ──────────────────────────────────────────────────────────────────
+
+class SecurityPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._svc = SecurityService()
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Security", "Permissions, listeners, firewall, SSH, AV."))
+        self._tbl = QTableWidget(0, 4)
+        self._tbl.setHorizontalHeaderLabels(["Name", "Severity", "Detail", "Suggestion"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setAlternatingRowColors(True)
+        outer.addWidget(self._tbl, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="sec-scan", fn=lambda: self._svc.scan(), on_done=lambda findings: self._bridge.post(self._render, findings))); self._runner.submit(spec)
+
+    def _render(self, findings) -> None:
+        self._tbl.setRowCount(len(findings))
+        for i, c in enumerate(findings):
+            self._tbl.setItem(i, 0, QTableWidgetItem(c.code))
+            sev = c.severity
+            sev_label = sev.label if hasattr(sev, "label") else str(sev)
+            self._tbl.setItem(i, 1, QTableWidgetItem(sev_label.upper()))
+            self._tbl.setItem(i, 2, QTableWidgetItem(c.title))
+            self._tbl.setItem(i, 3, QTableWidgetItem((c.detail or "")[:120]))
+
+
+# ── Network ───────────────────────────────────────────────────────────────────
+
+class NetworkPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Network", "Interfaces and listening ports."))
+        outer.addWidget(make_section("Interfaces"))
+        self._ifaces = QTableWidget(0, 5)
+        self._ifaces.setHorizontalHeaderLabels(["Name", "State", "IPv4", "IPv6", "Speed"])
+        self._ifaces.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._ifaces.verticalHeader().setVisible(False)
+        outer.addWidget(self._ifaces, 1)
+        outer.addWidget(make_section("Listening ports"))
+        self._ports = QTableWidget(0, 4)
+        self._ports.setHorizontalHeaderLabels(["Port", "Proto", "Address", "Process"])
+        self._ports.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._ports.verticalHeader().setVisible(False)
+        outer.addWidget(self._ports, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="net-scan", fn=lambda: scan_network(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        ifaces = r.interfaces
+        self._ifaces.setRowCount(len(ifaces))
+        for i, n in enumerate(ifaces):
+            self._ifaces.setItem(i, 0, QTableWidgetItem(n["name"]))
+            self._ifaces.setItem(i, 1, QTableWidgetItem(n["state"]))
+            self._ifaces.setItem(i, 2, QTableWidgetItem(", ".join(n["ipv4"])))
+            self._ifaces.setItem(i, 3, QTableWidgetItem(", ".join(n["ipv6"])))
+            self._ifaces.setItem(i, 4, QTableWidgetItem(n["speed"]))
+        ports = r.listening
+        self._ports.setRowCount(len(ports))
+        for i, p in enumerate(ports):
+            self._ports.setItem(i, 0, QTableWidgetItem(str(p["port"])))
+            self._ports.setItem(i, 1, QTableWidgetItem(p["proto"]))
+            self._ports.setItem(i, 2, QTableWidgetItem(p["address"]))
+            self._ports.setItem(i, 3, QTableWidgetItem(p["process"][:30]))
+
+
+# ── Disks ─────────────────────────────────────────────────────────────────────
+
+class DisksPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Disks", "Filesystems and SMART status."))
+        outer.addWidget(make_section("Filesystems"))
+        self._tbl = QTableWidget(0, 5)
+        self._tbl.setHorizontalHeaderLabels(["Mount", "Device", "Used", "Total", "Use %"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        outer.addWidget(self._tbl, 1)
+        outer.addWidget(make_section("SMART"))
+        self._smart = QTextEdit(); self._smart.setReadOnly(True)
+        outer.addWidget(self._smart, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="disks-scan", fn=lambda: scan_disks(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        filesystems = r.filesystems
+        self._tbl.setRowCount(len(filesystems))
+        for i, fs in enumerate(filesystems):
+            self._tbl.setItem(i, 0, QTableWidgetItem(fs["mount"]))
+            self._tbl.setItem(i, 1, QTableWidgetItem(fs["device"]))
+            self._tbl.setItem(i, 2, QTableWidgetItem(fmt_bytes(fs["used"])))
+            self._tbl.setItem(i, 3, QTableWidgetItem(fmt_bytes(fs["total"])))
+            self._tbl.setItem(i, 4, QTableWidgetItem(f"{fs['percent']:.0f}%"))
+        if r.smart:
+            txt = "\n".join(f"● {s.get('device', '?')}" for s in r.smart)
+        else:
+            txt = "SMART data unavailable (install smartmontools or run as root)."
+        self._smart.setPlainText(txt)
+
+
+# ── Drivers ───────────────────────────────────────────────────────────────────
+
+class DriversPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Drivers", "Kernel modules currently loaded."))
+        self._tbl = QTableWidget(0, 4)
+        self._tbl.setHorizontalHeaderLabels(["Module", "Size", "Used by", "State"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        outer.addWidget(self._tbl, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="drv-scan", fn=lambda: scan_drivers(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        mods = r.modules
+        self._tbl.setRowCount(len(mods))
+        for i, m in enumerate(mods):
+            self._tbl.setItem(i, 0, QTableWidgetItem(m["name"]))
+            self._tbl.setItem(i, 1, QTableWidgetItem(m["size"]))
+            self._tbl.setItem(i, 2, QTableWidgetItem(m["used_by"]))
+            self._tbl.setItem(i, 3, QTableWidgetItem(m["state"]))
+
+
+# ── Packages ──────────────────────────────────────────────────────────────────
+
+class PackagesPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Packages", "Orphaned and duplicate packages."))
+        self._tbl = QTableWidget(0, 3)
+        self._tbl.setHorizontalHeaderLabels(["Package", "Manager", "Reason"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        outer.addWidget(self._tbl, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="pkg-scan", fn=lambda: scan_packages(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        pkgs = r.packages
+        self._tbl.setRowCount(len(pkgs))
+        for i, p in enumerate(pkgs):
+            self._tbl.setItem(i, 0, QTableWidgetItem(p["name"]))
+            self._tbl.setItem(i, 1, QTableWidgetItem(p["manager"]))
+            self._tbl.setItem(i, 2, QTableWidgetItem(p["reason"]))
+
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+
+class StartupPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Startup", "Enabled systemd services."))
+        self._tbl = QTableWidget(0, 4)
+        self._tbl.setHorizontalHeaderLabels(["Name", "Scope", "State", "Description"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        outer.addWidget(self._tbl, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="startup-scan", fn=lambda: scan_startup(), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        items = r.items
+        self._tbl.setRowCount(len(items))
+        for i, it in enumerate(items):
+            self._tbl.setItem(i, 0, QTableWidgetItem(it["name"]))
+            self._tbl.setItem(i, 1, QTableWidgetItem(it["scope"]))
+            self._tbl.setItem(i, 2, QTableWidgetItem(it["state"]))
+            self._tbl.setItem(i, 3, QTableWidgetItem((it.get("description") or "")[:100]))
+
+
+# ── Restore ───────────────────────────────────────────────────────────────────
+
+class RestorePage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Restore",
+            "Backups created by the Cleaner. Restore any backup to revert changes."))
+        self._tbl = QTableWidget(0, 4)
+        self._tbl.setHorizontalHeaderLabels(["ID", "Created", "Reason", "Files"])
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tbl.verticalHeader().setVisible(False)
+        outer.addWidget(self._tbl, 1)
+        bar = QHBoxLayout()
+        self._btn_refresh = QPushButton("Refresh")
+        self._btn_refresh.clicked.connect(self._refresh)
+        self._btn_restore = QPushButton("Restore selected")
+        self._btn_restore.setObjectName("danger")
+        self._btn_restore.clicked.connect(self._restore)
+        bar.addStretch(); bar.addWidget(self._btn_refresh); bar.addWidget(self._btn_restore)
+        bw = QWidget(); bw.setLayout(bar); outer.addWidget(bw)
+
+    def _refresh(self) -> None:
+        try:
+            backups = backup_svc.list_backups()
+        except Exception as e:  # noqa: BLE001
+            _show_toast(self, f"Cannot list backups: {e}", "error")
+            backups = []
+        self._backups = backups
+        self._tbl.setRowCount(len(backups))
+        for i, b in enumerate(backups):
+            self._tbl.setItem(i, 0, QTableWidgetItem(str(b.id)))
+            self._tbl.setItem(i, 1, QTableWidgetItem(b.created_at[:19]))
+            self._tbl.setItem(i, 2, QTableWidgetItem(b.reason or ""))
+            self._tbl.setItem(i, 3, QTableWidgetItem(str(len(b.files))))
+
+    def _restore(self) -> None:
+        rows = self._tbl.selectionModel().selectedRows()
+        if not rows:
+            _show_toast(self, "No backup selected.", "warn"); return
+        bid = int(self._tbl.item(rows[0].row(), 0).text())
+        confirm = QMessageBox.question(
+            self, "Confirm restore",
+            f"Restore backup #{bid}?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            backup_svc.restore(self._backups[rows[0].row()])
+            _show_toast(self, f"Backup #{bid} restored.", "success")
+        except Exception as e:  # noqa: BLE001
+            _show_toast(self, f"Restore failed: {e}", "error")
+
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+
+class LogsPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        self._runner = _runner(host)
+        self._bridge = _bridge(host)
+        _wire_bridge(self)
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(make_title("Logs", "Recent system log entries."))
+        self._view = QTextEdit(); self._view.setReadOnly(True)
+        f = QFont("Monospace"); f.setStyleHint(QFont.StyleHint.Monospace)
+        self._view.setFont(f)
+        outer.addWidget(self._view, 1)
+
+    def on_show(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        (spec := TaskSpec(name="logs-fetch", fn=lambda: tail_logs(lines=400), on_done=lambda r: self._bridge.post(self._render, r))); self._runner.submit(spec)
+
+    def _render(self, r) -> None:
+        self._view.setPlainText("\n".join(r.lines))
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+class SettingsPage(QWidget):
+    def __init__(self, host: QWidget) -> None:
+        super().__init__()
+        win = host.window()
+        self._cfg = getattr(win, "config", None)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setSpacing(12)
+        outer.addWidget(make_title("Settings", "Theme, accent and safety options."))
+        outer.addWidget(make_section("Appearance"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Theme"))
+        self._theme = QComboBox()
+        self._theme.addItems(["dark", "light"])
+        if self._cfg:
+            self._theme.setCurrentText(self._cfg.theme)
+        row.addWidget(self._theme)
+        row.addSpacing(20)
+        row.addWidget(QLabel("Accent"))
+        self._accent = QComboBox()
+        self._accent.addItems(["blue", "green", "mauve", "pink"])
+        if self._cfg:
+            self._accent.setCurrentText(self._cfg.accent)
+        row.addWidget(self._accent)
+        row.addStretch()
+        rw = QWidget(); rw.setLayout(row); outer.addWidget(rw)
+
+        outer.addWidget(make_section("Safety"))
+        self._dry = QCheckBox("Always preview cleaner with dry-run")
+        self._dry.setChecked(True)
+        outer.addWidget(self._dry)
+        self._backup = QCheckBox("Create backup before every clean")
+        self._backup.setChecked(True)
+        outer.addWidget(self._backup)
+
+        bar = QHBoxLayout(); bar.addStretch()
+        apply_btn = QPushButton("Apply"); apply_btn.setObjectName("primary")
+        apply_btn.clicked.connect(self._apply)
+        bar.addWidget(apply_btn)
+        bw = QWidget(); bw.setLayout(bar); outer.addWidget(bw)
+
+    def _apply(self) -> None:
+        if not self._cfg:
+            return
+        from aegis.ui.theme import apply as apply_theme, qss as theme_qss
+        from aegis.ui.app_qt import MainWindow
+        self._cfg.theme = self._theme.currentText()
+        self._cfg.accent = self._accent.currentText()
+        try:
+            self._cfg.save()
+        except Exception:
+            pass
+        apply_theme(self._cfg.theme, self._cfg.accent)
+        win = self.window()
+        if isinstance(win, MainWindow):
+            win.setStyleSheet(theme_qss())
+        _show_toast(self, "Settings applied.", "success")
+
+
+# ── registry ──────────────────────────────────────────────────────────────────
+
+def build_pages(host: QWidget) -> dict[str, QWidget]:
+    return {
+        "dashboard": DashboardPage(host),
+        "cleaner": CleanerPage(host),
+        "monitor": MonitorPage(host),
+        "performance": PerformancePage(host),
+        "health": HealthPage(host),
+        "security": SecurityPage(host),
+        "network": NetworkPage(host),
+        "disks": DisksPage(host),
+        "drivers": DriversPage(host),
+        "packages": PackagesPage(host),
+        "startup": StartupPage(host),
+        "restore": RestorePage(host),
+        "logs": LogsPage(host),
+        "settings": SettingsPage(host),
+    }
