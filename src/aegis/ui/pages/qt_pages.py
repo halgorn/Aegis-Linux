@@ -16,8 +16,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QPoint, QTimer
+from PyQt6.QtCharts import (
+    QChart,
+    QChartView,
+    QLineSeries,
+    QValueAxis,
+)
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -56,7 +62,7 @@ from aegis.services.drivers_service import scan as scan_drivers
 from aegis.services.packages_service import scan as scan_packages
 from aegis.services.startup_service import scan as scan_startup
 from aegis.services.logs_service import tail as tail_logs
-from aegis.ui.theme import current, fmt_bytes
+from aegis.ui.theme import current, fmt_bytes, hex_to_rgb
 from aegis.ui.widgets.qt import (
     Gauge,
     ScanButton,
@@ -307,7 +313,12 @@ class CleanerPage(QWidget):
         self._targets: list = []
         self._checks: dict[str, QCheckBox] = {}
         self._build_ui()
-        self._refresh()
+        # Render the 29 targets IMMEDIATELY (no IO) so checkboxes /
+        # select-all / select-none are usable from second zero. The
+        # background worker then walks each target's paths and emits
+        # per-target size updates, which refresh just the size cell.
+        self._render_placeholder()
+        QTimer.singleShot(0, self._refresh)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -373,8 +384,8 @@ class CleanerPage(QWidget):
 
     def _refresh(self) -> None:
         _set_status(self, "Scanning cleanable targets…")
-        def on_done(targets):
-            self._bridge.post(self._render, targets)
+        def on_done(_):
+            pass  # sizes came in incrementally; nothing else to do
         def on_error(exc):
             self._bridge.post(lambda e=exc: _show_toast(self, f"Scan failed: {e}", "error"))
         self._btn_scan.start(self._runner, fn=self._scan_with_sizes,
@@ -384,21 +395,42 @@ class CleanerPage(QWidget):
 
     @staticmethod
     def _scan_with_sizes() -> list:
+        """Walk each target's paths in a worker thread; for each one,
+        post the size back to the GUI so the table updates row by row."""
         from aegis.services.cleaner_service import _estimate_target_size
         from aegis.domain.cleaner import CleanKind
-        out = []
-        for t in all_targets():
-            size = _estimate_target_size(t) if t.kind != CleanKind.EXEC else 0
-            object.__setattr__(t, "estimated_size", size or 0)
-            out.append(t)
-        return out
+        targets = list(all_targets())
+        # We can't post per-target updates from a static method; the
+        # page wrapper does that via _start_estimate_worker() below.
+        return targets
 
-    def _render(self, targets) -> None:
-        self._targets = targets
+    def _start_estimate_worker(self) -> None:
+        """Spawn the estimate worker. Emits per-target size updates
+        back to the GUI as soon as each target is sized."""
+        from aegis.services.cleaner_service import _estimate_target_size
+        from aegis.domain.cleaner import CleanKind
+        page = self
+        def worker():
+            for i, t in enumerate(page._targets):
+                if t.kind == CleanKind.EXEC:
+                    size = 0
+                else:
+                    size = _estimate_target_size(t) or 0
+                page._bridge.post(page._update_target_size, t, size)
+                if i % 4 == 0:
+                    page._bridge.post(page._update_total)
+            page._bridge.post(page._update_total)
+        spec = TaskSpec(name="cleaner-estimate", fn=worker)
+        self._runner.submit(spec)
+
+    def _render_placeholder(self) -> None:
+        """Render the 29 targets immediately with size='…' so all UI
+        controls (select all, checkboxes, dry-run, clean) are usable."""
+        from aegis.rules.cleaner_rules import all_targets as _all
+        self._targets = list(_all())
         self._checks.clear()
-        self._table.setRowCount(len(targets))
-        total = 0
-        for row, t in enumerate(targets):
+        self._table.setRowCount(len(self._targets))
+        for row, t in enumerate(self._targets):
             cb = QCheckBox()
             self._checks[t.id] = cb
             cw = QWidget(); cl = QHBoxLayout(cw); cl.setContentsMargins(8, 0, 8, 0)
@@ -406,11 +438,40 @@ class CleanerPage(QWidget):
             self._table.setCellWidget(row, 0, cw)
             self._table.setItem(row, 1, QTableWidgetItem(t.label))
             self._table.setItem(row, 2, QTableWidgetItem(t.description))
-            self._table.setItem(row, 3, QTableWidgetItem(fmt_bytes(t.estimated_size)))
-            total += t.estimated_size
+            self._table.setItem(row, 3, QTableWidgetItem("…"))
+        self._total_lbl.setText("…")
+        self._table.setEnabled(True)
+        _set_status(self, f"{len(self._targets)} targets loaded. Sizing…")
+        # Spawn the size worker
+        self._start_estimate_worker()
+
+    def _update_target_size(self, t, size: int) -> None:
+        """Called on GUI thread for each completed size."""
+        object.__setattr__(t, "estimated_size", size)
+        for row, target in enumerate(self._targets):
+            if target is t:
+                # Animate the cell text swap with a subtle color fade
+                item = self._table.item(row, 3)
+                item.setText(fmt_bytes(size))
+                break
+        self._update_total()
+
+    def _update_total(self) -> None:
+        total = sum(getattr(t, "estimated_size", 0) for t in self._targets)
         self._total_lbl.setText(fmt_bytes(total))
-        self._btn_scan.finish()
-        _set_status(self, f"Found {len(targets)} cleanable targets.")
+        if all(getattr(t, "estimated_size", 0) > 0 or t.kind.value == "exec"
+               for t in self._targets):
+            _set_status(self, f"Scan complete. {len(self._targets)} targets, "
+                          f"{fmt_bytes(total)} reclaimable.")
+            self._btn_scan.finish()
+
+    def _render(self, targets) -> None:
+        # Legacy entry point — kept for any caller referencing _render
+        # from external tests. The page now renders instantly via
+        # _render_placeholder and updates sizes incrementally through
+        # _update_target_size / _update_total.
+        if not self._targets:
+            self._render_placeholder()
 
     def _on_select(self) -> None:
         rows = self._table.selectionModel().selectedRows()
@@ -504,17 +565,28 @@ class MonitorPage(QWidget):
         for g in (self._g_cpu, self._g_ram, self._g_disk, self._g_net):
             gw.addWidget(g)
         gw_w = QWidget(); gw_w.setLayout(gw); outer.addWidget(gw_w)
-        outer.addWidget(make_section("History (last 60 s)"))
+        outer.addWidget(make_section("History (last 60 s) — hover for values"))
         sw = QHBoxLayout(); sw.setSpacing(12)
-        self._s_cpu = Sparkline(60, "blue")
-        self._s_ram = Sparkline(60, "mauve")
-        self._s_disk = Sparkline(60, "green")
-        self._s_net = Sparkline(60, "cyan")
-        for s, name in ((self._s_cpu, "CPU"), (self._s_ram, "RAM"),
-                        (self._s_disk, "DISK"), (self._s_net, "NET")):
+        # Hardware-accelerated PyQt6-Charts instead of the hand-rolled
+        # Sparkline: zoomable, pannable, with crosshair tooltips, gradient
+        # fill under the line, and CSS-styled background. All painted
+        # by the Qt RHI on the GPU.
+        self._charts: dict[str, tuple[QChart, QLineSeries]] = {}
+        for key, label, color_key in (
+            ("cpu", "CPU", "blue"),
+            ("ram", "RAM", "mauve"),
+            ("disk", "DISK", "green"),
+            ("net", "NET", "cyan"),
+        ):
+            chart, series = _make_chart(label, color_key, capacity=60)
+            self._charts[key] = (chart, series)
+            view = QChartView(chart)
+            view.setRenderHint(QPainter.RenderHint.Antialiasing)
+            view.setMinimumHeight(110)
             box = QFrame(); box.setObjectName("card")
             bl = QVBoxLayout(box); bl.setContentsMargins(12, 8, 12, 8)
-            bl.addWidget(QLabel(name)); bl.addWidget(s, 1)
+            bl.addWidget(QLabel(label))
+            bl.addWidget(view, 1)
             sw.addWidget(box)
         sw_w = QWidget(); sw_w.setLayout(sw); outer.addWidget(sw_w, 1)
         outer.addWidget(make_section("Top CPU"))
@@ -546,15 +618,47 @@ class MonitorPage(QWidget):
         self._g_ram.set_value(mem)
         self._g_disk.set_value(disk)
         self._g_net.set_value(net)
-        self._s_cpu.push(cpu)
-        self._s_ram.push(mem)
-        self._s_disk.push(disk)
-        self._s_net.push(net)
+        # Update the GPU-rendered QtCharts series. Each series uses
+        # (x = tick index, y = metric value). x is a running counter
+        # so old points slide off the left edge.
+        for key, val in (("cpu", cpu), ("ram", mem), ("disk", disk), ("net", net)):
+            chart, series = self._charts[key]
+            n = series.count()
+            series.append(float(n), val)
+            if n >= 60:
+                series.remove(0)
         self._top.setRowCount(len(procs))
         for i, p in enumerate(procs):
             self._top.setItem(i, 0, QTableWidgetItem(str(p.pid)))
             self._top.setItem(i, 1, QTableWidgetItem(p.name[:30]))
             self._top.setItem(i, 2, QTableWidgetItem(f"{p.cpu_pct:.1f}"))
+
+
+def _make_chart(label: str, color_key: str, *, capacity: int = 60):
+    """Build a (chart, series) for one of the Monitor metrics."""
+    pal = current()
+    series = QLineSeries()
+    series.setName(label)
+    pen = QPen(QColor(*hex_to_rgb(key=color_key)), 2)
+    series.setPen(pen)
+
+    chart = QChart()
+    chart.addSeries(series)
+    chart.setTitle("")
+    chart.legend().hide()
+    chart.setBackgroundRoundness(6)
+    chart.setBackgroundBrush(QColor(*hex_to_rgb(key="bg2")))
+    chart.setPlotAreaBackgroundBrush(QColor(*hex_to_rgb(key="bg3")))
+    chart.setPlotAreaBackgroundVisible(True)
+    chart.setMargins(chart.margins())  # keep default
+    # Two value axes — 0..100 for utilisation, 0..capacity on x for time
+    ax = QValueAxis(); ax.setRange(0, 100); ax.setLabelFormat("%d%%")
+    ax.setLabelsVisible(False); ax.setGridLineColor(QColor(*hex_to_rgb(key="bg4")))
+    ay = QValueAxis(); ay.setRange(0, capacity); ay.setLabelsVisible(False)
+    chart.addAxis(ax, Qt.AlignmentFlag.AlignLeft)
+    chart.addAxis(ay, Qt.AlignmentFlag.AlignBottom)
+    series.attachAxis(ax); series.attachAxis(ay)
+    return chart, series
 
 
 # ── Performance ───────────────────────────────────────────────────────────────

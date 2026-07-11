@@ -8,10 +8,18 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+)
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
+    QGraphicsBlurEffect,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -122,8 +130,30 @@ class MainWindow(QMainWindow):
         page = self._pages.get(key)
         if page is None:
             return
+        # Cross-fade between pages — the new page fades in over the
+        # old one for 180ms, both composited by the GPU.
+        cur = self.stack.currentWidget()
+        if cur is not None and cur is not page:
+            eff = QGraphicsOpacityEffect(cur)
+            cur.setGraphicsEffect(eff)
+            anim_out = QPropertyAnimation(eff, b"opacity", self)
+            anim_out.setDuration(120)
+            anim_out.setStartValue(1.0)
+            anim_out.setEndValue(0.0)
+            anim_out.setEasingCurve(QEasingCurve.Type.InCubic)
+            anim_out.start()
+            anim_out.finished.connect(lambda c=cur: c.setGraphicsEffect(None))
         self.stack.setCurrentWidget(page)
         self._header.setText(key.capitalize())
+        eff_in = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(eff_in)
+        anim_in = QPropertyAnimation(eff_in, b"opacity", self)
+        anim_in.setDuration(180)
+        anim_in.setStartValue(0.0)
+        anim_in.setEndValue(1.0)
+        anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim_in.start()
+        anim_in.finished.connect(lambda p=page: p.setGraphicsEffect(None))
         # Allow pages to react
         if hasattr(page, "on_show"):
             try:
@@ -146,6 +176,14 @@ class MainWindow(QMainWindow):
 def launch_gui(config: Config | None = None) -> int:
     """Entry point used by ``python -m aegis``."""
     app = QApplication.instance() or QApplication(sys.argv)
+    # Force the Qt RHI to use the desktop OpenGL backend so all
+    # QPainter, QPropertyAnimation and PyQt6-Charts drawing is
+    # composited by the GPU instead of the XRender / software path.
+    # Falls back to software if no GL is available.
+    QApplication.setAttribute(
+        Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
+    QApplication.setAttribute(
+        Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app.setApplicationName("Aegis Linux")
     app.setOrganizationName("Aegis")
     win = MainWindow(config or Config.load())

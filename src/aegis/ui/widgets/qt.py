@@ -18,6 +18,7 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    pyqtProperty,
     pyqtSignal,
     pyqtSlot,
 )
@@ -35,6 +36,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
@@ -115,9 +117,20 @@ class ScanButton(QPushButton):
     def __init__(self, label: str = "Run scan") -> None:
         super().__init__(label)
         self.setObjectName("primary")
+        self.setMouseTracking(True)
         self._idle_label = label
         self._busy_label = label + " · …"
         self._current: Any = None  # current TaskSpec; cancelled on re-click
+        # GPU-driven glow on hover — QGraphicsDropShadowEffect is
+        # composited by the Qt RHI; just toggling the blur radius
+        # triggers a repaint that the GPU handles in <1ms.
+        self._glow = QGraphicsDropShadowEffect(self)
+        self._glow.setBlurRadius(0)
+        self._glow.setOffset(0, 0)
+        self._glow.setColor(QColor(*hex_to_rgb(key="blue")))
+        self.setGraphicsEffect(self._glow)
+        self._glow_anim = QPropertyAnimation(self._glow, b"blurRadius", self)
+        self._glow_anim.setDuration(180)
 
     def start(self, runner: TaskRunner, fn, bridge: WorkerBridge | None = None,
               *, name: str = "scan", on_done=None, on_error=None) -> None:
@@ -386,7 +399,12 @@ class Sparkline(QWidget):
 
 
 class Gauge(QWidget):
-    """Circular progress gauge, 0..100."""
+    """Circular progress gauge, 0..100.
+
+    The arc fills with a :class:`QPropertyAnimation` so the needle
+    tweens between values rather than snapping — composited by the
+    GPU via the Qt RHI.
+    """
 
     def __init__(self, label: str = "", size: int = 120) -> None:
         super().__init__()
@@ -394,10 +412,56 @@ class Gauge(QWidget):
         self._label = label
         self._size = size
         self.setFixedSize(size, size + 22)
+        # Animation property — gives us value updates on every frame.
+        self._anim = QPropertyAnimation(self, b"gaugeValue", self)
+        self._anim.setDuration(420)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def set_value(self, v: float) -> None:
-        self._value = max(0.0, min(100.0, v))
-        self.update()
+        target = max(0.0, min(100.0, v))
+        if abs(target - self._value) < 0.5:
+            self._value = target
+            self.update()
+            return
+        try:
+            self._anim.stop()
+        except RuntimeError:
+            pass
+        self._anim.setStartValue(self._value)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    # Qt property accessed by the animation framework.
+    def _get_value(self) -> float:
+        return self._value
+
+    def _set_value(self, v: float) -> None:
+        self._value = v
+        self.update()  # schedule a repaint
+
+    # pyqtProperty is what QPropertyAnimation looks for.
+    gaugeValue = pyqtProperty(float, fget=_get_value, fset=_set_value)
+
+    # ── hover glow animation (primary buttons only) ────────────────
+    def enterEvent(self, ev):  # noqa: N802
+        try:
+            self._glow_anim.stop()
+        except RuntimeError:
+            pass
+        self._glow_anim.setStartValue(self._glow.blurRadius())
+        self._glow_anim.setEndValue(18)
+        self._glow_anim.start()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):  # noqa: N802
+        try:
+            self._glow_anim.stop()
+        except RuntimeError:
+            pass
+        self._glow_anim.setStartValue(self._glow.blurRadius())
+        self._glow_anim.setEndValue(0)
+        self._glow_anim.start()
+        super().leaveEvent(ev)
 
     def paintEvent(self, _evt) -> None:  # noqa: N802
         p = QPainter(self)
@@ -411,7 +475,8 @@ class Gauge(QWidget):
         pal = current()
         col = pal.green if self._value < 60 else pal.yellow if self._value < 85 else pal.red
         r, g, b = int(col[1:3], 16), int(col[3:5], 16), int(col[5:7], 16)
-        p.setPen(QPen(QColor(r, g, b), 8))
+        p.setPen(QPen(QColor(r, g, b, 230), 8, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
         span = -int(360 * 16 * (self._value / 100.0))
         p.drawArc(rect, 90 * 16, span)
         # Center text
