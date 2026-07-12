@@ -26,6 +26,23 @@ def _adapter_health(args):
     return HealthService().run()
 
 
+def export_health(fmt: str = "text") -> str:
+    """Run a health scan and return the report in the requested format.
+
+    ``fmt`` is one of: ``text``, ``json``, ``html``. ``html`` is
+    printable (open in browser, Ctrl-P to PDF) — we deliberately don't
+    pull in WeasyPrint/reportlab just for one report.
+    """
+    from aegis.services.health_service import HealthService
+    report = HealthService().run()
+    if fmt == "json":
+        import json
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if fmt == "html":
+        return report.to_html()
+    return report.to_text()
+
+
 def _adapter_security(args):
     from aegis.services.security_service import SecurityService
     return SecurityService().scan()

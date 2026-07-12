@@ -41,6 +41,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run a one-shot health report and exit",
     )
     p.add_argument(
+        "--json",
+        action="store_true",
+        help="(with --doctor) emit JSON instead of text",
+    )
+    p.add_argument(
+        "--html",
+        action="store_true",
+        help="(with --doctor) emit printable HTML (Ctrl-P to PDF)",
+    )
+    p.add_argument(
+        "--output", type=Path, default=None,
+        help="(with --doctor) write the report to this file instead of stdout",
+    )
+    p.add_argument(
         "--headless-clean",
         nargs="+",
         metavar="TARGET_ID",
@@ -103,8 +117,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_scan(args.category, args)
 
     if args.doctor:
-        from aegis.services.health_service import HealthService
-        print(HealthService().to_text())
+        from aegis.core.scanners import export_health
+        fmt = "html" if args.html else ("json" if args.json else "text")
+        print(export_health(fmt=fmt))
+        if args.output:
+            from pathlib import Path
+            Path(args.output).write_text(
+                export_health(fmt=fmt), encoding="utf-8")
         return 0
 
     if args.headless_clean:
