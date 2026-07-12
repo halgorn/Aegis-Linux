@@ -6,6 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux-orange.svg)](#)
 [![Status](https://img.shields.io/badge/status-Alpha-yellow.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-91%20passing-brightgreen.svg)](#)
 
 Aegis Linux is a modern, open-source system optimization, monitoring,
 maintenance and security suite designed specifically for Linux.
@@ -15,159 +16,189 @@ btop and Microsoft Sysinternals into one coherent application.
 
 ---
 
+## Screenshots
+
+| Dashboard | Monitor |
+|-----------|---------|
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Monitor](docs/screenshots/monitor.png) |
+
+| Health | Cleaner |
+|--------|---------|
+| ![Health](docs/screenshots/health.png) | ![Cleaner](docs/screenshots/cleaner.png) |
+
+---
+
+## Why Aegis?
+
+| Concern | CCleaner (Win) | Stacer / BleachBit | btop | **Aegis Linux** |
+|---------|----------------|--------------------|------|------------------|
+| Cleaner | ✓ | ✓ | ✗ | **✓ (29 targets)** |
+| Live monitor | ✗ | basic | ✓ | **✓ (PyQt6-Charts)** |
+| Health score | ✗ | ✗ | ✗ | **✓ (0-100 + grade)** |
+| Security audit | ✗ | ✗ | ✗ | **✓ (16 findings)** |
+| Driver list | ✗ | ✗ | ✗ | **✓** |
+| Cleaner backup | ✗ | ✗ | ✗ | **✓ (reversible)** |
+| Restore point | limited | ✗ | ✗ | **✓** |
+| JSON CLI for scripts | ✗ | ✗ | ✗ | **✓ (`aegis scan`)** |
+| Cross-distro portable | ✗ | ✗ | ✗ | **✓ (AppImage)** |
+| Local-only, no telemetry | ✗ | varies | ✓ | **✓ (opt-in only)** |
+| Open source | ✗ | ✓ | ✓ | **✓ (MIT)** |
+
+---
+
+## Install
+
+### AppImage (no install, drag-and-drop)
+
+```bash
+# from the releases page:
+wget https://github.com/halgorn/Aegis-Linux/releases/download/v1.0.0/Aegis-Linux-1.0.0-x86_64.AppImage
+chmod +x Aegis-Linux-*.AppImage
+./Aegis-Linux-*.AppImage
+```
+
+### Debian / Ubuntu (.deb)
+
+```bash
+wget https://github.com/halgorn/Aegis-Linux/releases/download/v1.0.0/aegis_1.0.0_amd64.deb
+sudo dpkg -i aegis_1.0.0_amd64.deb
+sudo apt install -f      # resolve dependencies
+aegis                     # launch the GUI
+aegis scan health        # or use the CLI
+```
+
+### From source (dev mode)
+
+```bash
+git clone https://github.com/halgorn/Aegis-Linux.git
+cd Aegis-Linux
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+python -m aegis          # launch the GUI
+python -m aegis scan health
+```
+
+---
+
+## CLI
+
+```bash
+aegis                                # launch the GUI
+aegis --doctor                       # one-shot health report (text)
+aegis scan health                    # JSON output
+aegis scan disks | jq '.filesystems | length'
+aegis scan network
+aegis scan performance
+aegis scan logs --lines 500
+aegis scan cleaner --target pip_cache --target npm_cache
+aegis scan cleaner --no-dry-run --target /tmp/large_dir
+```
+
+`aegis scan --help` lists all 10 scanners.
+
+---
+
+## Features
+
+* **14 pages** — Dashboard, Cleaner, Monitor (live), Performance, Health, Security,
+  Network, Disks, Drivers, Packages, Startup, Restore, Logs, Settings.
+* **Simple mode** — Hides 11 advanced pages, shows only Dashboard / Cleaner /
+  Health. Toggleable from Settings, perfect for non-technical users.
+* **First-run wizard** — Picks language, theme, mode, and telemetry opt-in.
+  No restart needed.
+* **i18n** — English + Brazilian Portuguese. No gettext / .po toolchain.
+* **Cleaner** — 29 targets (browser caches, package managers, system logs,
+  thumbnail caches). Bounded walk so a 42 GB trash directory doesn't freeze
+  the UI. Dry-run by default. Creates a backup before any real delete.
+* **Monitor** — GPU-accelerated PyQt6-Charts line series for CPU/RAM/Disk/Net.
+  Live toasts when RAM ≥ 85%, Disk ≥ 90%, Swap ≥ 50%, or GPU temp ≥ 80°C.
+* **Health** — 0-100 wellness score with grade (A+…F) and a list of issues
+  sorted by severity (failed services, world-writable files, old kernels,
+  SSH key permissions, swap pressure, etc.).
+* **Security** — Listeners, world-writable files, open relays, antivirus
+  presence, SSH hardening.
+* **Restore** — Every Cleaner run creates a backup; restore from any point.
+* **Config** — Atomic JSON writes (no corruption on crash), XDG-compliant
+  location, no root required for read paths.
+
+---
+
 ## Architecture
 
 Aegis follows **Clean Architecture / Hexagonal** principles:
 
 ```
 src/aegis/
-├── core/         cross-cutting infra (config, logging, concurrency)
+├── core/         cross-cutting infra (config, logging, concurrency, i18n, scanners)
 ├── domain/       pure business models (no I/O, no UI)
 ├── collectors/   I/O adapters (read /proc, /sys, subprocess, files)
 ├── services/     use cases (orchestrate collectors + rules)
 ├── rules/        declarative detection thresholds
-├── persistence/  config, history, metrics cache
-├── plugins/      plugin system (Fase 8)
-├── daemon/       background service (Fase 7)
-└── ui/           presentation layer (Qt6 primary, Tk fallback)
-    ├── theme.py        palette + QSS / Tk styling
-    ├── widgets/        reusable widgets (cards, charts, gauges)
-    ├── pages/          one file per page (14 pages, all wired)
-    └── app_qt.py       QApplication + QStackedWidget (default)
-    └── app.py          Tk fallback (use `aegis --tk`)
+├── ui/pages/qt/  one file per Qt page (each ≤ 500 LOC)
+└── ui/widgets/   reusable Qt widgets (gauge, scan button, sparkline, ...)
 ```
 
-Each module has a single responsibility, exposes a small surface,
-and can be tested in isolation. UI never imports collectors
-directly — UI talks to services which talk to collectors.
+Rules of the road:
 
-See [`docs/architecture.md`](docs/architecture.md) for details.
+* ≤ 500 LOC per file
+* No circular imports (UI imports services; services never import UI)
+* Thread-safe: scans run in `TaskRunner` workers, GUI updates go through `WorkerBridge`
+* KISS/YAGNI: no premature abstraction, no factory-for-one-product
 
----
-
-## Features
-
-### Cleaning
-apt, dnf, pacman, zypper caches · snap revisions · flatpak unused
-runtimes · pip/npm/yarn/pnpm/cargo/go/gradle caches · docker/podman
-build cache · VSCode / JetBrains / Android Studio / Unity / Unreal /
-Godot / Steam / Heroic / Wine / Proton / Lutris caches · browsers
-(chrome, firefox, brave, edge, opera, vivaldi) · thumbnail, font,
-recent files, trash, journalctl, tmp, crash reports, core dumps,
-broken symlinks, orphan .desktop, duplicates by hash, large files.
-
-### Performance
-CPU governor / frequency / temperature · RAM / Swap / ZRAM / ZSWAP ·
-disk I/O scheduler · sysctl (swappiness, THP, NUMA) · TRIM · SMART /
-NVMe health · load average / pressure · GPU util + VRAM + temp ·
-battery · power profile · fan RPM.
-
-### Monitoring
-Real-time metrics with 1Hz refresh, 10-min rolling history, export
-to JSON/CSV. Floating overlay widget (Fase 7).
-
-### Security
-Open ports / listeners · firewall (ufw, firewalld, nftables) · SSH
-config audit · SUID/SGID · world-writable files · cron + systemd
-inspection · rootkit hints (rkhunter wrapper) · fail2ban · SELinux /
-AppArmor status · /etc/hosts editor · DNS leak check.
-
-### Network
-Interfaces, gateway, DNS, ARP, mDNS device discovery, active
-connections with GeoIP, bandwidth live, ping, packet loss,
-Whois, speedtest, VPN detection.
-
-### Drivers / Firmware
-Inventory via `lshw` / `lspci` / `lsusb`, DKMS status, firmware via
-`fwupdmgr`, microcode, driver update suggestions.
-
-### Disk
-SMART / NVMe / bad blocks / lifetime estimate / temperature,
-filesystem fragmentation, snapshots (BTRFS / ZFS), LVM, RAID,
-TRIM, mount options.
-
-### Backup
-Restore points (BTRFS / ZFS snapshots + config tarballs), rollback,
-export settings.
-
-### Startup Manager
-systemd user + system services, cron, autostart .desktop, snap,
-flatpak, AppImage. Measure boot time, enable/disable, impact
-estimate.
-
-### Process Explorer
-Tree view (parent PID), CPU/RAM/GPU per process, threads, open
-files, sockets, libraries, kill/suspend/resume, nice/affinity.
-
-### AI Assistant (Fase 6)
-Offline-first rule engine explaining problems and suggesting
-actions. Optional local LLM hook (llama.cpp).
-
-### Plugins (Fase 8)
-Entry-point based plugin system. Hooks: pre_clean, post_clean,
-register_collector, register_page.
-
----
-
-## Installation
-
-### From source
-
-```bash
-git clone https://github.com/halgorn/Aegis-Linux.git
-cd Aegis-Linux
-pip install -e .              # installs PyQt6 + platformdirs
-aegis                         # launch Qt6 GUI (14 pages)
-aegis --doctor                # health check (no GUI)
-aegis --headless-clean --dry-run   # preview cleanup targets
-aegis --no-gui --doctor       # explicit headless
-aegis --tk                    # use the Tk fallback UI
-```
-
-> PyQt6 is the default since v0.2. The Tkinter fallback (`aegis --tk`)
-> remains available for environments where Qt is not installed.
-
-### Distribution packages (planned)
-
-Flatpak, AppImage, .deb, .rpm, AUR.
+See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ---
 
 ## Development
 
 ```bash
+# Install dev deps
 pip install -e ".[dev]"
+
+# Run tests
+pytest -q                          # unit + GUI integration (91 tests)
+
+# Lint
 ruff check src tests
-black src tests
-mypy src/aegis
-pytest
+black --check src tests
+
+# Build a .deb locally
+./packaging/deb/build.sh
+
+# Build an AppImage locally (needs appimagetool)
+./packaging/appimage/build.sh
 ```
 
----
+### Adding a scanner
 
-## Roadmap
+1. Add an adapter in `src/aegis/core/scanners.py`:
 
-See [`docs/roadmap.md`](docs/roadmap.md) for the full phased plan.
+   ```python
+   def _adapter_mything(args):
+       from mypackage import thing
+       return thing.scan()
 
-Current focus: **Fase 0 → Fase 1** (foundation + domain +
-collectors).
+   SCANNERS["mything"] = (_adapter_mything, "MyThing - description")
+   ```
 
----
+2. Add the new scanner to the appropriate page in `src/aegis/ui/pages/qt/`.
 
-## Contributing
+The CLI picks it up automatically — `aegis scan mything` just works.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+### Adding a translation
+
+1. Edit `src/aegis/core/i18n.py` and add `MESSAGES_<code>` with the new keys.
+2. Add the code to `_LOCALES`.
+3. Add the human label to `available_locales()`.
+
+No `.po` files, no Qt Linguist.
 
 ---
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
----
+## Contributing
 
-## Inspiration
-
-CCleaner · BleachBit · Glances · Stacer · htop · btop · Cockpit ·
-KDE System Monitor · GNOME System Monitor · Microsoft Sysinternals ·
-System76 firmware utilities.
+PRs welcome. Run `pytest -q` before pushing — 91 tests must pass.
