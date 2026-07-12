@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build artifacts (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip build
+          sudo apt-get install -y dpkg-dev fakeroot
+
+      - name: Build .deb
+        env:
+          VERSION: ${GITHUB_REF_NAME:-dev}
+        run: |
+          ./packaging/deb/build.sh "${VERSION#v}"
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-deb-${{ matrix.os }}
+          path: dist/aegis_*.deb
+
+  appimage:
+    name: Build AppImage
+    needs: test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          sudo apt-get install -y libfuse2
+          # appimagetool
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImageCommunity/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Build AppImage
+        env:
+          VERSION: ${GITHUB_REF_NAME:-dev}
+          APPIMAGETOOL: /usr/local/bin/appimagetool
+        run: |
+          ./packaging/appimage/build.sh "${VERSION#v}"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-appimage
+          path: dist/Aegis-Linux-*.AppImage
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, appimage]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

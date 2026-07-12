@@ -1,25 +1,39 @@
-# AppImage build script (Fase 9)
+# Aegis Linux AppImage
 
-Plan:
+Single-file portable build. Requires:
+
+* Linux host (the AppImage embeds glibc and Qt6 — won't run on older kernels)
+* Python 3.11+
+* `pip install pyinstaller`
+* `appimagetool` — get from https://github.com/AppImageCommunity/AppImageKit/releases
+
+## Build
 
 ```bash
-# 1. Build a relocatable Python runtime with PyInstaller
-pyinstaller --noconfirm --windowed --name aegis \
-    --collect-submodules aegis \
-    src/aegis/__main__.py
-
-# 2. Bundle in a minimal AppDir
-mkdir -p AppDir/usr/bin AppDir/usr/share/applications
-cp dist/aegis/aegis AppDir/usr/bin/
-cp packaging/aegis.desktop AppDir/usr/share/applications/
-cp assets/icons/256x256/aegis.png AppDir/aegis.png
-
-# 3. Use linuxdeploy to wrap in an AppImage
-linuxdeploy --appdir AppDir \
-    --output appimage \
-    --desktop-file packaging/aegis.desktop \
-    --icon-file assets/icons/256x256/aegis.png
+./packaging/appimage/build.sh            # version from git describe
+./packaging/appimage/build.sh v1.0.0     # explicit version
 ```
 
-CI integration: `.github/workflows/appimage.yml` runs the script on
-tag pushes.
+Output: `dist/Aegis-Linux-<version>-x86_64.AppImage` (~ 70 MB).
+
+## Run
+
+```bash
+chmod +x Aegis-Linux-*.AppImage
+./Aegis-Linux-*.AppImage                 # GUI launches
+./Aegis-Linux-*.AppImage scan health     # CLI scanner
+./Aegis-Linux-*.AppImage --help
+```
+
+## Why AppImage?
+
+* One file, drag-and-drop install, no root.
+* No system pollution: config under `$HOME/.config/aegis/`, no `/usr` writes.
+* Works on Ubuntu, Fedora, Arch, Mint, etc. — same binary.
+* Auto-updateable via AppImageUpdate (we'll add a checker later).
+
+## Limitations
+
+* Requires FUSE on the host. If running on a server without FUSE,
+  extract with `AppImageExtract` and run `./squashfs-root/usr/bin/aegis`.
+* First launch is slow (~ 1s) due to FUSE mount. Subsequent are instant.
