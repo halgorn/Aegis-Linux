@@ -1,11 +1,12 @@
 """Command-line entry point for Aegis Linux.
 
-Provides three top-level commands:
+Top-level commands:
 
-* ``aegis``            → launch the GUI (default).
-* ``aegis --doctor``   → print a one-shot health report to stdout.
-* ``aegis --headless-clean TARGET_ID [...]``
-                        → run the cleaner service without a UI.
+* ``aegis``                          → launch the GUI (default).
+* ``aegis --doctor``                 → one-shot health report.
+* ``aegis --headless-clean ID ...``  → run the cleaner headless.
+* ``aegis scan <category> [--json]`` → run any single scanner and
+                                       print the result as JSON.
 
 This module is intentionally thin. All real work lives in the
 ``services`` package; the CLI is just an adapter.
@@ -22,7 +23,7 @@ from typing import Sequence
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="aegis",
-        description="Aegis Linux — performance & security suite",
+        description="Aegis Linux - performance & security suite",
     )
     p.add_argument(
         "--no-gui",
@@ -61,6 +62,29 @@ def _build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+
+    sub = p.add_subparsers(dest="command")
+    scan_p = sub.add_parser(
+        "scan", help="run a single scanner and print the result as JSON",
+    )
+    from aegis.core.scanners import list_scanners
+    scan_p.add_argument(
+        "category", choices=list_scanners(),
+        help="which scanner to run",
+    )
+    scan_p.add_argument(
+        "--target", action="append", default=[],
+        help="(cleaner) target ID; repeat for multiple. Empty = all.",
+    )
+    scan_p.add_argument(
+        "--lines", type=int, default=200,
+        help="(logs) how many lines to fetch",
+    )
+    scan_p.add_argument(
+        "--no-dry-run", dest="dry_run", action="store_false",
+        help="(cleaner) actually delete; without this flag it's a dry run",
+    )
+    scan_p.set_defaults(dry_run=True)
     return p
 
 
@@ -69,21 +93,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Lazy imports so --help stays fast and tkinter is optional at CLI.
     from aegis.core.logging import setup_logging
-    from aegis.core.paths import xdg_config_dir, ensure_dirs
+    from aegis.core.paths import ensure_dirs
 
     setup_logging(args.log_level)
     ensure_dirs()
 
+    if args.command == "scan":
+        from aegis.core.scanners import run_scan
+        return run_scan(args.category, args)
+
     if args.doctor:
         from aegis.services.health_service import HealthService
-
-        report = HealthService().run()
-        print(report.to_text())
+        print(HealthService().to_text())
         return 0
 
     if args.headless_clean:
         from aegis.services.cleaner_service import CleanerService
-
         result = CleanerService().run(args.headless_clean, dry_run=args.dry_run)
         print(result.to_text())
         return 0 if result.ok else 1
@@ -105,8 +130,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from aegis.ui.app_qt import launch_gui
     except ImportError as exc:
         print(f"error: Qt GUI not available: {exc}", file=sys.stderr)
-        print("hint: install PyQt6 or use --tk / --doctor / --headless-clean",
-              file=sys.stderr)
+        print("hint: install PyQt6 or use --tk / --doctor / --headless-clean "
+              "or `aegis scan <category>`", file=sys.stderr)
         return 3
 
     return launch_gui()
