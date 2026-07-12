@@ -26,21 +26,28 @@ class _Step(QFrame):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 22, 28, 22)
         lay.setSpacing(14)
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(
+        self._title_lbl = QLabel(title)
+        self._title_lbl.setStyleSheet(
             f"font-size: 14pt; font-weight: 700; color: {current().fg};"
         )
-        title_lbl.setWordWrap(True)
-        lay.addWidget(title_lbl)
+        self._title_lbl.setWordWrap(True)
+        self._title_key = ""  # set by subclass to the i18n key
+        lay.addWidget(self._title_lbl)
         self.body = QVBoxLayout()
         self.body.setSpacing(10)
         lay.addLayout(self.body)
         lay.addStretch()
 
+    def retranslate(self) -> None:
+        """Re-apply the title translation."""
+        if self._title_key:
+            self._title_lbl.setText(tr(self._title_key))
+
 
 class _LangStep(_Step):
     def __init__(self) -> None:
         super().__init__(tr("wizard.lang.title"))
+        self._title_key = "wizard.lang.title"
         self._group = QButtonGroup(self)
         for code, label in available_locales():
             rb = QRadioButton(f"{label}  ({code})")
@@ -58,6 +65,7 @@ class _LangStep(_Step):
 class _ThemeStep(_Step):
     def __init__(self) -> None:
         super().__init__(tr("wizard.theme.title"))
+        self._title_key = "wizard.theme.title"
         self._group = QButtonGroup(self)
         for t in ("dark", "light"):
             rb = QRadioButton(t.capitalize())
@@ -75,6 +83,7 @@ class _ThemeStep(_Step):
 class _ModeStep(_Step):
     def __init__(self) -> None:
         super().__init__(tr("wizard.mode.title"))
+        self._title_key = "wizard.mode.title"
         self._group = QButtonGroup(self)
         adv = QRadioButton(tr("wizard.mode.advanced"))
         adv.setProperty("simple", False)
@@ -94,14 +103,20 @@ class _ModeStep(_Step):
 class _TelemetryStep(_Step):
     def __init__(self) -> None:
         super().__init__(tr("wizard.telemetry.title"))
-        body_lbl = QLabel(tr("wizard.telemetry.body"))
-        body_lbl.setWordWrap(True)
-        self.body.addWidget(body_lbl)
+        self._title_key = "wizard.telemetry.title"
+        self._body_lbl = QLabel(tr("wizard.telemetry.body"))
+        self._body_lbl.setWordWrap(True)
+        self.body.addWidget(self._body_lbl)
         self._opt_in = QCheckBox(tr("wizard.telemetry.yes"))
         self.body.addWidget(self._opt_in)
 
     def selected(self) -> bool:
         return self._opt_in.isChecked()
+
+    def retranslate(self) -> None:
+        super().retranslate()
+        self._body_lbl.setText(tr("wizard.telemetry.body"))
+        self._opt_in.setText(tr("wizard.telemetry.yes"))
 
 
 class FirstRunWizard(QWidget):
@@ -197,12 +212,9 @@ class FirstRunWizard(QWidget):
 
     def _refresh_translations(self) -> None:
         """Re-apply translations after the language step was confirmed."""
-        titles = (
-            "wizard.lang.title", "wizard.theme.title",
-            "wizard.mode.title", "wizard.telemetry.title",
-        )
-        for step, key in zip(self._steps, titles):
-            step.children()[0].setText(tr(key))  # type: ignore[attr-defined]
+        for step in self._steps:
+            if hasattr(step, "retranslate"):
+                step.retranslate()
         self._btn_finish.setText(tr("wizard.finish"))
 
 

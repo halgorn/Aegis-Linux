@@ -66,3 +66,29 @@ def test_wizard_simple_mode_choice(qt_app, tmp_home):
     simple_btn.setChecked(True)
     wiz._on_finish()
     assert cfg.simple_mode is True
+
+
+def test_wizard_next_refreshes_translations(qt_app, tmp_home):
+    """Regression: clicking Next on the language step must not crash.
+
+    Bug: ``_refresh_translations()`` did ``step.children()[0].setText(...)``
+    which is a QVBoxLayout (not a label). Stores the title key on each
+    step instead and uses ``step.retranslate()``.
+    """
+    from aegis.core.config import Config
+    from aegis.core import i18n
+    from aegis.ui.wizard import FirstRunWizard
+    cfg = Config()
+    wiz = FirstRunWizard(cfg)
+    i18n.set_locale("en")
+    # Click Next on the language step — this used to crash.
+    wiz._stack.setCurrentIndex(0)
+    wiz._on_next()
+    # Title on step 0 should now show the en translation (no-op, same).
+    assert wiz._steps[0]._title_lbl.text() == i18n.tr("wizard.lang.title")
+    # Now switch to pt-BR and confirm the title updates.
+    i18n.set_locale("pt-BR")
+    pt_step = wiz._steps[0]
+    pt_step.retranslate()
+    assert pt_step._title_lbl.text() == i18n.tr("wizard.lang.title", _locale=None) or \
+           "Escolha" in pt_step._title_lbl.text()
