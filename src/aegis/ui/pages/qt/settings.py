@@ -48,6 +48,10 @@ class SettingsPage(QWidget):
         self._backup = QCheckBox(tr("settings.backup"))
         self._backup.setChecked(True)
         outer.addWidget(self._backup)
+        self._simple = QCheckBox(tr("settings.simple_mode"))
+        if self._cfg:
+            self._simple.setChecked(self._cfg.simple_mode)
+        outer.addWidget(self._simple)
 
         bar = QHBoxLayout(); bar.addStretch()
         apply_btn = QPushButton(tr("settings.apply")); apply_btn.setObjectName("primary")
@@ -63,8 +67,10 @@ class SettingsPage(QWidget):
             return
         from aegis.ui.theme import apply as apply_theme, qss as theme_qss
         from aegis.ui.app_qt import MainWindow
+        prev_simple = self._cfg.simple_mode
         self._cfg.theme = self._theme.currentText()
         self._cfg.accent = self._accent.currentText()
+        self._cfg.simple_mode = self._simple.isChecked()
         try:
             self._cfg.save()
         except Exception:
@@ -73,8 +79,11 @@ class SettingsPage(QWidget):
         win = self.window()
         if isinstance(win, MainWindow):
             win.setStyleSheet(theme_qss())
+            if self._cfg.simple_mode != prev_simple:
+                win.set_simple_mode(self._cfg.simple_mode)
         _show_toast(self, tr("settings.applied"), "success")
 
     def retranslate(self) -> None:
         self._dry.setText(tr("settings.dry_run"))
         self._backup.setText(tr("settings.backup"))
+        self._simple.setText(tr("settings.simple_mode"))

@@ -35,6 +35,8 @@ _DEFAULTS: dict[str, Any] = {
     "ai_provider": "offline",             # offline | local | cloud
     "ai_model": "",
     "locale": "",
+    "simple_mode": False,
+    "first_run_complete": False,
 }
 
 
@@ -64,6 +66,8 @@ class Config:
     ai_provider: str = "offline"
     ai_model: str = ""
     locale: str = ""
+    simple_mode: bool = False
+    first_run_complete: bool = False
     _extra: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod

@@ -87,7 +87,10 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
 
-        self.sidebar = Sidebar(_NAV_ITEMS, width=200)
+        nav_items = _NAV_ITEMS
+        if self.config.simple_mode:
+            nav_items = [it for it in nav_items if it.key in _SIMPLE_NAV_KEYS]
+        self.sidebar = Sidebar(nav_items, width=200)
         self.sidebar.selected.connect(self.show_page)
         h.addWidget(self.sidebar)
 
@@ -199,13 +202,29 @@ class MainWindow(QMainWindow):
     def show_toast(self, text: str, kind: str = "info") -> None:
         self.toasts.show_toast(text, kind=kind)
 
+    def set_simple_mode(self, enabled: bool) -> None:
+        """Toggle between simple and advanced navigation."""
+        self.config.simple_mode = enabled
+        try:
+            self.config.save()
+        except Exception:  # noqa: BLE001
+            pass
+        nav_items = _NAV_ITEMS if not enabled else [
+            it for it in _NAV_ITEMS if it.key in _SIMPLE_NAV_KEYS
+        ]
+        # Reset the sidebar's source list and re-translate.
+        self.sidebar._items = nav_items
+        self.sidebar._rebuild_items()
+        # If the user is currently on a page that's now hidden,
+        # bounce them back to the dashboard.
+        if self.stack.currentWidget() is not None:
+            current_key = self.stack.currentWidget().property("page_key") or "dashboard"
+            if enabled and current_key not in _SIMPLE_NAV_KEYS:
+                self.show_page("dashboard")
+
 
 def launch_gui(config: Config | None = None) -> int:
     """Entry point used by ``python -m aegis``."""
-    # Qt docs are explicit: the OpenGL backend attribute MUST be set
-    # before the QCoreApplication (and therefore the QApplication) is
-    # constructed. Calling it after is silently ignored and logs a
-    # warning at best. So we set it first.
     if QApplication.instance() is None:
         QApplication.setAttribute(
             Qt.ApplicationAttribute.AA_UseDesktopOpenGL, True)
@@ -214,7 +233,27 @@ def launch_gui(config: Config | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Aegis Linux")
     app.setOrganizationName("Aegis")
-    win = MainWindow(config or Config.load())
+
+    cfg = config or Config.load()
+
+    # First-run wizard: 4 short screens (lang / theme / mode / telemetry),
+    # only on a fresh install or when explicitly reset via
+    # ``Config.first_run_complete = False``.
+    if not cfg.first_run_complete:
+        from aegis.core import i18n
+        if cfg.locale:
+            i18n.set_locale(cfg.locale)
+        from aegis.ui.wizard import FirstRunWizard
+        wiz = FirstRunWizard(cfg)
+        wiz.setWindowTitle("Aegis Linux - Setup")
+        wiz.resize(560, 460)
+        wiz.show()
+        app.exec()  # block until Finish
+        # Reload to pick up the wizard's writes.
+        cfg = Config.load()
+        i18n.set_locale(cfg.locale)
+
+    win = MainWindow(cfg)
     win.show()
     return app.exec()
 
