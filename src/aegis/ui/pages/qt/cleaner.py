@@ -1,13 +1,15 @@
-"""Cleaner page — select + scan + clean targets."""
+"""Cleaner page - select + scan + clean targets."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
+    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from aegis.core.concurrency import TaskSpec
+from aegis.core.i18n import tr
 from aegis.domain.cleaner import CleanKind
 from aegis.services.cleaner_service import CleanerService
 from aegis.ui.theme import fmt_bytes
@@ -18,10 +20,6 @@ from aegis.ui.pages.qt._helpers import (
 
 
 class CleanerPage(QWidget):
-    """CleanerPage mixes in CancellableScanMixin via direct attribute
-    setup — we don't actually call its methods from elsewhere, so we
-    keep the dependencies minimal here."""
-
     def __init__(self, host: QWidget) -> None:
         super().__init__()
         self._pending: list = []
@@ -38,25 +36,25 @@ class CleanerPage(QWidget):
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(12)
         outer.addWidget(make_title(
-            "Cleaner",
-            "Select what to clean. Dry-run is on by default - no files are removed until you confirm.",
+            tr("cleaner.title"),
+            tr("cleaner.subtitle"),
         ))
         bar = QHBoxLayout()
-        self._btn_all = QPushButton("Select all")
+        self._btn_all = QPushButton(tr("cleaner.select_all"))
         self._btn_all.clicked.connect(self._select_all)
-        self._btn_none = QPushButton("Select none")
+        self._btn_none = QPushButton(tr("cleaner.select_none"))
         self._btn_none.clicked.connect(self._select_none)
-        self._dryrun = QCheckBox("Dry run")
+        self._dryrun = QCheckBox(tr("cleaner.dry_run"))
         self._dryrun.setChecked(True)
-        self._btn_scan = ScanButton("Scan", page=self)
+        self._btn_scan = ScanButton(tr("cleaner.scan"), page=self)
         self._btn_scan.clicked.connect(self._refresh)
-        self._btn_clean = QPushButton("Clean selected")
+        self._btn_clean = QPushButton(tr("cleaner.clean_selected"))
         self._btn_clean.setObjectName("danger")
         self._btn_clean.clicked.connect(self._clean)
         bar.addWidget(self._btn_all)
         bar.addWidget(self._btn_none)
         bar.addSpacing(20)
-        bar.addWidget(QLabel("Total reclaimable:"))
+        bar.addWidget(QLabel(tr("cleaner.total_reclaimable")))
         self._total_lbl = QLabel("-")
         self._total_lbl.setStyleSheet("font-weight: 600;")
         bar.addWidget(self._total_lbl)
@@ -79,7 +77,7 @@ class CleanerPage(QWidget):
 
         detail = QFrame(); detail.setObjectName("card")
         dl = QVBoxLayout(detail); dl.setContentsMargins(16, 14, 16, 14); dl.setSpacing(6)
-        dl.addWidget(QLabel("Selection details"))
+        dl.addWidget(QLabel(tr("cleaner.selection_details")))
         self._detail = QTextEdit(); self._detail.setReadOnly(True)
         dl.addWidget(self._detail, 1)
         split.addWidget(detail)
@@ -111,6 +109,12 @@ class CleanerPage(QWidget):
         for spec in list(self._pending):
             spec.cancel()
         self._pending.clear()
+
+    def retranslate(self) -> None:
+        self._btn_all.setText(tr("cleaner.select_all"))
+        self._btn_none.setText(tr("cleaner.select_none"))
+        self._dryrun.setText(tr("cleaner.dry_run"))
+        self._btn_clean.setText(tr("cleaner.clean_selected"))
 
     def _refresh(self) -> None:
         _set_status(self, "Scanning cleanable targets...")
@@ -213,13 +217,11 @@ class CleanerPage(QWidget):
     def _clean(self) -> None:
         ids = [tid for tid, cb in self._checks.items() if cb.isChecked()]
         if not ids:
-            _show_toast(self, "No targets selected.", "warn"); return
+            _show_toast(self, tr("cleaner.no_selection"), "warn"); return
         if not self._dryrun.isChecked():
-            from PyQt6.QtWidgets import QMessageBox
             r = QMessageBox.question(
-                self, "Confirm cleanup",
-                f"Delete files from {len(ids)} targets?\n"
-                "This action is reversible only via the Restore page if a backup was made.",
+                self, tr("cleaner.confirm_title"),
+                tr("cleaner.confirm_body", n=len(ids)),
             )
             if r != QMessageBox.StandardButton.Yes:
                 return
@@ -227,8 +229,8 @@ class CleanerPage(QWidget):
             return
         self._btn_clean_busy = True
         self._btn_clean.setEnabled(False)
-        self._btn_clean.setText("Cleaning…")
-        _set_status(self, "Cleaning...")
+        self._btn_clean.setText(tr("cleaner.cleaning"))
+        _set_status(self, tr("cleaner.cleaning"))
         dry = self._dryrun.isChecked()
 
         def run():
@@ -244,9 +246,9 @@ class CleanerPage(QWidget):
     def _on_clean_done(self, res, dry: bool) -> None:
         self._btn_clean_busy = False
         self._btn_clean.setEnabled(True)
-        self._btn_clean.setText("Clean selected")
-        msg = (f"{'[DRY] ' if dry else ''}Reclaimed "
-               f"{fmt_bytes(res.bytes_freed)} across {len(res.records)} items.")
+        self._btn_clean.setText(tr("cleaner.clean_selected"))
+        key = "cleaner.toast_clean_done_dry" if dry else "cleaner.toast_clean_done"
+        msg = tr(key, size=fmt_bytes(res.bytes_freed), n=len(res.records))
         _show_toast(self, msg, "success")
         _set_status(self, msg)
         self._refresh()
@@ -254,5 +256,5 @@ class CleanerPage(QWidget):
     def _on_clean_error(self, exc) -> None:
         self._btn_clean_busy = False
         self._btn_clean.setEnabled(True)
-        self._btn_clean.setText("Clean selected")
-        _show_toast(self, f"Clean failed: {exc}", "error")
+        self._btn_clean.setText(tr("cleaner.clean_selected"))
+        _show_toast(self, tr("cleaner.toast_clean_failed", err=str(exc)), "error")

@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from aegis.core.i18n import tr
 from aegis.ui.widgets.qt import make_section, make_title
 from aegis.ui.pages.qt._helpers import _show_toast
 
@@ -21,17 +22,17 @@ class SettingsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(12)
-        outer.addWidget(make_title("Settings", "Theme, accent and safety options."))
-        outer.addWidget(make_section("Appearance"))
+        outer.addWidget(make_title(tr("settings.title"), "Theme, accent and safety options."))
+        outer.addWidget(make_section(tr("settings.appearance")))
         row = QHBoxLayout()
-        row.addWidget(QLabel("Theme"))
+        row.addWidget(QLabel(tr("settings.theme")))
         self._theme = QComboBox()
         self._theme.addItems(["dark", "light"])
         if self._cfg:
             self._theme.setCurrentText(self._cfg.theme)
         row.addWidget(self._theme)
         row.addSpacing(20)
-        row.addWidget(QLabel("Accent"))
+        row.addWidget(QLabel(tr("settings.accent")))
         self._accent = QComboBox()
         self._accent.addItems(["blue", "green", "mauve", "pink"])
         if self._cfg:
@@ -40,16 +41,16 @@ class SettingsPage(QWidget):
         row.addStretch()
         rw = QWidget(); rw.setLayout(row); outer.addWidget(rw)
 
-        outer.addWidget(make_section("Safety"))
-        self._dry = QCheckBox("Always preview cleaner with dry-run")
+        outer.addWidget(make_section(tr("settings.safety")))
+        self._dry = QCheckBox(tr("settings.dry_run"))
         self._dry.setChecked(True)
         outer.addWidget(self._dry)
-        self._backup = QCheckBox("Create backup before every clean")
+        self._backup = QCheckBox(tr("settings.backup"))
         self._backup.setChecked(True)
         outer.addWidget(self._backup)
 
         bar = QHBoxLayout(); bar.addStretch()
-        apply_btn = QPushButton("Apply"); apply_btn.setObjectName("primary")
+        apply_btn = QPushButton(tr("settings.apply")); apply_btn.setObjectName("primary")
         apply_btn.clicked.connect(self._apply)
         bar.addWidget(apply_btn)
         bw = QWidget(); bw.setLayout(bar); outer.addWidget(bw)
@@ -72,4 +73,8 @@ class SettingsPage(QWidget):
         win = self.window()
         if isinstance(win, MainWindow):
             win.setStyleSheet(theme_qss())
-        _show_toast(self, "Settings applied.", "success")
+        _show_toast(self, tr("settings.applied"), "success")
+
+    def retranslate(self) -> None:
+        self._dry.setText(tr("settings.dry_run"))
+        self._backup.setText(tr("settings.backup"))

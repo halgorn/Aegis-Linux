@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aegis.core.config import Config
+from aegis.core.i18n import tr
 from aegis.ui.theme import apply, qpalette, qss
 from aegis.ui.widgets.qt import Sidebar, ToastHost, NavItem
 
@@ -42,22 +43,28 @@ class PageSpec:
     factory: callable  # type: ignore[type-arg]
 
 
+# Labels are i18n keys; the Sidebar translates them on render so
+# users see the active locale without a restart.
 _NAV_ITEMS = [
-    NavItem("dashboard", "Dashboard", "⌂"),
-    NavItem("cleaner", "Cleaner", "⚙"),
-    NavItem("monitor", "Monitor", "▣"),
-    NavItem("performance", "Performance", "↗"),
-    NavItem("health", "Health", "♥"),
-    NavItem("security", "Security", "⌖"),
-    NavItem("network", "Network", "⇆"),
-    NavItem("disks", "Disks", "◉"),
-    NavItem("drivers", "Drivers", "✦"),
-    NavItem("packages", "Packages", "▤"),
-    NavItem("startup", "Startup", "▶"),
-    NavItem("restore", "Restore", "⤺"),
-    NavItem("logs", "Logs", "☰"),
-    NavItem("settings", "Settings", "✱"),
+    NavItem("dashboard", "nav.dashboard", "⌂"),
+    NavItem("cleaner", "nav.cleaner", "⚙"),
+    NavItem("monitor", "nav.monitor", "▣"),
+    NavItem("performance", "nav.performance", "↗"),
+    NavItem("health", "nav.health", "♥"),
+    NavItem("security", "nav.security", "⌖"),
+    NavItem("network", "nav.network", "⇆"),
+    NavItem("disks", "nav.disks", "◉"),
+    NavItem("drivers", "nav.drivers", "✦"),
+    NavItem("packages", "nav.packages", "▤"),
+    NavItem("startup", "nav.startup", "▶"),
+    NavItem("restore", "nav.restore", "⤺"),
+    NavItem("logs", "nav.logs", "☰"),
+    NavItem("settings", "nav.settings", "✱"),
 ]
+
+# "Simple mode" — only the essentials. The advanced pages are hidden
+# from the sidebar but still reachable via direct route / settings.
+_SIMPLE_NAV_KEYS = frozenset({"dashboard", "cleaner", "health"})
 
 
 class MainWindow(QMainWindow):
@@ -125,6 +132,18 @@ class MainWindow(QMainWindow):
     def _palette_border(self) -> str:
         from aegis.ui.theme import current as _cur
         return _cur().border
+
+    def set_locale(self, code: str) -> None:
+        """Change language at runtime and refresh all visible labels."""
+        from aegis.core import i18n
+        i18n.set_locale(code)
+        self.sidebar.retranslate()
+        for page in self._pages.values():
+            if hasattr(page, "retranslate"):
+                try:
+                    page.retranslate()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def show_page(self, key: str) -> None:
         page = self._pages.get(key)

@@ -332,11 +332,8 @@ class Sidebar(QFrame):
         lay.addWidget(brand)
 
         self._list = QListWidget()
-        for item in items:
-            li = QListWidgetItem(f" {item.icon}   {item.label}")
-            li.setData(Qt.ItemDataRole.UserRole, item.key)
-            li.setSizeHint(QSize(0, 36))
-            self._list.addItem(li)
+        self._items = list(items)
+        self._rebuild_items()
         self._list.setCurrentRow(0)
         self._list.currentItemChanged.connect(self._on_changed)
         lay.addWidget(self._list, 1)
@@ -360,6 +357,24 @@ class Sidebar(QFrame):
             if li.data(Qt.ItemDataRole.UserRole) == key:
                 self._list.setCurrentRow(i)
                 return
+
+    def _rebuild_items(self) -> None:
+        """Populate the list with translated labels."""
+        from aegis.core.i18n import tr
+        self._list.clear()
+        for item in self._items:
+            label = tr(item.label) if item.label.startswith("nav.") else item.label
+            li = QListWidgetItem(f" {item.icon}   {label}")
+            li.setData(Qt.ItemDataRole.UserRole, item.key)
+            li.setSizeHint(QSize(0, 36))
+            self._list.addItem(li)
+
+    def retranslate(self) -> None:
+        """Re-translate all visible labels (call after locale change)."""
+        cur_row = self._list.currentRow()
+        self._rebuild_items()
+        if cur_row >= 0:
+            self._list.setCurrentRow(cur_row)
 
 
 # ── scroll area ───────────────────────────────────────────────────────────────
